@@ -14,6 +14,9 @@ add_executable(hpc_worker
   src/collectors/cpu_collector.cpp
   src/collectors/memory_collector.cpp
   src/collectors/load_collector.cpp
+  src/collectors/thermal_collector.cpp
+  src/collectors/power_collector.cpp
+  src/collectors/fan_collector.cpp
   src/transports/stdout_transport.cpp
   src/transports/udp_transport.cpp
 )

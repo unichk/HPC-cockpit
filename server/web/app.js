@@ -48,6 +48,8 @@ const METRIC_POINTS = [
   { id: "load_avg_triplet", label: "Load avg (1/5/15)" },
   { id: "memory_used_total", label: "Memory (used/all)" },
   { id: "swap_used_total", label: "Swap (used/all)" },
+  { id: "thermal", label: "Thermal" },
+  { id: "fan", label: "Fan" },
 ];
 
 let selectedPointIds = new Set(METRIC_POINTS.map((point) => point.id));
@@ -118,7 +120,11 @@ function selectedPoints() {
 function renderSummary(nodes, details) {
   const cpuValues = details.map((detail) => metricValue(detail.latest.metrics, "cpu", "usage"));
   const avgCpu = cpuValues.length ? cpuValues.reduce((acc, v) => acc + v, 0) / cpuValues.length : 0;
-  const estimatedPower = nodes.length * (0.35 + avgCpu * 0.045);
+  const measuredPowerWatts = details
+    .map((detail) => metricValue(detail.latest.metrics, "power", "watts"))
+    .reduce((acc, value) => acc + value, 0);
+  const estimatedPowerWatts = nodes.length * (350 + avgCpu * 45);
+  const powerWatts = measuredPowerWatts > 0 ? measuredPowerWatts : estimatedPowerWatts;
 
   let healthText = "Systems All Good";
   let healthColor = "var(--light-green)";
@@ -132,7 +138,7 @@ function renderSummary(nodes, details) {
     healthColor = "#f2b84b";
   }
 
-  document.getElementById("power-draw").textContent = fmtNumber(estimatedPower, 1);
+  document.getElementById("power-draw").textContent = fmtNumber(powerWatts, 0);
   document.getElementById("cluster-meta").textContent = healthText;
   document.getElementById("cluster-meta").style.color = healthColor;
   document.getElementById("brand-status-dot").style.background = healthColor;
@@ -156,6 +162,8 @@ function renderPointRow(pointId, metrics, alert) {
   const swapUsedKb = metricValue(metrics, "memory", "swap_used");
   const swapTotalKb = metricValue(metrics, "memory", "swap_total");
   const swapPct = swapTotalKb > 0 ? clampPercent((swapUsedKb / swapTotalKb) * 100) : 0;
+  const thermalAvailable = metricValue(metrics, "thermal", "available") > 0;
+  const fanAvailable = metricValue(metrics, "fan", "available") > 0;
 
   if (pointId === "cpu_usage") {
     return `
@@ -175,12 +183,12 @@ function renderPointRow(pointId, metrics, alert) {
       <div class="metric-row">
         <div class="metric-head">
           <span class="metric-label"><span class="metric-main">Load</span></span>
-          <span class="load-triplet${alert ? " alert" : ""}">
-            <span class="load-chip"><span>1m</span><strong>${fmtNumber(load1, 2)}</strong></span>
-            <span class="load-chip"><span>5m</span><strong>${fmtNumber(load5, 2)}</strong></span>
-            <span class="load-chip"><span>15m</span><strong>${fmtNumber(load15, 2)}</strong></span>
-          </span>
         </div>
+        <span class="load-triplet${alert ? " alert" : ""}">
+          <span class="load-chip"><span>1m</span><strong>${fmtNumber(load1, 2)}</strong></span>
+          <span class="load-chip"><span>5m</span><strong>${fmtNumber(load5, 2)}</strong></span>
+          <span class="load-chip"><span>15m</span><strong>${fmtNumber(load15, 2)}</strong></span>
+        </span>
       </div>
     `;
   }
@@ -211,6 +219,67 @@ function renderPointRow(pointId, metrics, alert) {
     `;
   }
 
+  if (pointId === "thermal") {
+    const cpuPkgMax = metricValueAny(metrics, "thermal", ["cpu_package_max_c", "cpu_package0_c"]);
+    const nvmeMax = metricValue(metrics, "thermal", "nvme_max_c");
+    const nicMax = metricValue(metrics, "thermal", "nic_max_c");
+    const chipset = metricValue(metrics, "thermal", "chipset_c");
+    const cpuLevel = metricValue(metrics, "thermal", "cpu_alert_level");
+    const nvmeLevel = metricValue(metrics, "thermal", "nvme_alert_level");
+    const nicLevel = metricValue(metrics, "thermal", "nic_alert_level");
+    const chipsetLevel = metricValue(metrics, "thermal", "chipset_alert_level");
+    const hot = cpuLevel >= 2 || nvmeLevel >= 2 || nicLevel >= 2 || chipsetLevel >= 2;
+    const warm = !hot && (cpuLevel >= 1 || nvmeLevel >= 1 || nicLevel >= 1 || chipsetLevel >= 1);
+    const tone = hot ? "crit" : warm ? "warn" : "";
+
+    return `
+      <div class="metric-row">
+        <div class="metric-head">
+          <span class="metric-label"><span class="metric-main">Thermal</span></span>
+        </div>
+        ${
+          !thermalAvailable
+            ? '<div class="text-meta">Unavailable</div>'
+            : `<div class="kv-list ${tone}">
+                <span>CPU <strong>${fmtNumber(cpuPkgMax, 1)}°C</strong></span>
+                <span>NVMe <strong>${fmtNumber(nvmeMax, 1)}°C</strong></span>
+                <span>NIC <strong>${fmtNumber(nicMax, 1)}°C</strong></span>
+                <span>PCH <strong>${fmtNumber(chipset, 1)}°C</strong></span>
+              </div>`
+        }
+      </div>
+    `;
+  }
+
+  if (pointId === "fan") {
+    const minRpm = metricValue(metrics, "fan", "min_rpm");
+    const maxRpm = metricValue(metrics, "fan", "max_rpm");
+    const avgRpm = metricValue(metrics, "fan", "avg_rpm");
+    const fanCount = metricValue(metrics, "fan", "count");
+    const okCount = metricValue(metrics, "fan", "ok_count");
+    const fanAlert = fanAvailable && fanCount > 0 && okCount < fanCount;
+    const avgKrpm = avgRpm / 1000.0;
+    const minKrpm = minRpm / 1000.0;
+    const maxKrpm = maxRpm / 1000.0;
+    return `
+      <div class="metric-row fan-row">
+        <div class="metric-head">
+          <span class="metric-label"><span class="metric-main">Fan</span></span>
+        </div>
+        ${
+          !fanAvailable
+            ? '<div class="text-meta">Unavailable</div>'
+            : `<div class="kv-list fan-inline${fanAlert ? " crit" : ""}">
+                <span>A <strong>${fmtNumber(avgKrpm, 2)}k</strong></span>
+                <span>Mn <strong>${fmtNumber(minKrpm, 2)}k</strong></span>
+                <span>Mx <strong>${fmtNumber(maxKrpm, 2)}k</strong></span>
+                <span>OK <strong>${fmtNumber(okCount, 0)}/${fmtNumber(fanCount, 0)}</strong></span>
+              </div>`
+        }
+      </div>
+    `;
+  }
+
   return "";
 }
 
@@ -226,6 +295,8 @@ function renderCards(nodes, detailsById, selectedRows) {
 
     const metrics = detail.latest.metrics;
     const cpu = clampPercent(metricValue(metrics, "cpu", "usage"));
+    const powerWatts = metricValue(metrics, "power", "watts");
+    const powerAvailable = metricValue(metrics, "power", "available") > 0;
     const stale = node.age_ms >= 60000;
     const nodeTimestamp = formatTimestamp(detail.latest.timestamp_ms);
     const subtitle = stale ? `Last data: ${nodeTimestamp} (stale)` : `Last data: ${nodeTimestamp}`;
@@ -245,8 +316,11 @@ function renderCards(nodes, detailsById, selectedRows) {
           </div>
           <div class="node-subtitle${stale ? " alert" : ""}">${subtitle}</div>
         </div>
-        <div class="node-orb-wrap">
-          <div class="node-orb ${stale ? "alert" : ageTone}"></div>
+        <div class="node-top-right">
+          <div class="node-power">${powerAvailable ? `${fmtNumber(powerWatts, 0)}W` : "--"}</div>
+          <div class="node-orb-wrap">
+            <div class="node-orb ${stale ? "alert" : ageTone}"></div>
+          </div>
         </div>
       </div>
       <div class="metric-stack">
@@ -257,7 +331,11 @@ function renderCards(nodes, detailsById, selectedRows) {
   }
 }
 
+let refreshInFlight = false;
+
 async function refresh() {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
   try {
     const nodesPayload = await fetchJson("/api/nodes");
     const nodes = (nodesPayload.nodes || []).slice().sort((a, b) => a.node_id.localeCompare(b.node_id));
@@ -273,6 +351,8 @@ async function refresh() {
   } catch (error) {
     document.getElementById("cluster-meta").textContent = `Error: ${error.message}`;
     document.getElementById("cluster-meta").style.color = "var(--sweet-peony)";
+  } finally {
+    refreshInFlight = false;
   }
 }
 
@@ -317,5 +397,5 @@ async function setupTestPanel() {
 
 setupTestPanel().then(() => {
   refresh();
-  setInterval(refresh, 2000);
+  setInterval(refresh, 1000);
 });

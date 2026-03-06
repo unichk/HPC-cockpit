@@ -2,7 +2,7 @@
 
 This is a lightweight worker designed for HPC nodes.
 
-- Collectors are modular (`cpu`, `memory`, `load` built in).
+- Collectors are modular (`cpu`, `memory`, `load`, `thermal`, `power`, `fan` built in).
 - Transport is pluggable (`stdout`, `udp` built in).
 - Server/UI lives in `../server`.
 
@@ -79,7 +79,7 @@ Root runtime note:
 
 `config/worker.conf` uses `key=value`:
 
-- `node_id`: unique node name
+- `node_id`: unique node name (optional, defaults to hostname)
 - `interval_ms`: sampling interval in milliseconds
 - `transport`: transport adapter name
 - `transport_udp_host`: destination IPv4 address for UDP transport
@@ -95,7 +95,7 @@ interval_ms=5000
 transport=stdout
 transport_udp_host=127.0.0.1
 transport_udp_port=9000
-modules=cpu,memory,load
+modules=cpu,memory,load,thermal,power,fan
 ```
 
 UDP mode example:
@@ -105,8 +105,20 @@ interval_ms=5000
 transport=udp
 transport_udp_host=192.168.1.50
 transport_udp_port=9000
-modules=cpu,memory,load
+modules=cpu,memory,load,thermal,power,fan
 ```
+
+Thermal thresholds emitted by `thermal` collector:
+- CPU package: warn `80C`, critical `90C`
+- NVMe composite: warn `70C`, critical `80C`
+- NIC: warn `85C`, critical `95C`
+- Chipset/PCH: warn `75C`, critical `85C`
+
+Host portability notes:
+- `cpu`, `memory`, `load` are Linux `/proc` based and portable across most Linux hosts.
+- `thermal` and `power` currently parse `sensors` CLI output (depends on `lm-sensors` and board sensor exposure).
+- `fan` currently parses `ipmitool sdr type Fan` output (depends on BMC/IPMI availability and permissions).
+- On hosts without those capabilities, these collectors report `available=0` instead of failing the worker.
 
 Protocol contract:
 - Transport sends one JSON snapshot per UDP datagram.

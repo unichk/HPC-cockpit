@@ -166,6 +166,16 @@ class StateStore:
                 mem_used_ratio = 0.1 + ((index * 11) % 70) / 100.0
                 mem_used_kb = base_total_mem_kb * mem_used_ratio
                 swap_used_kb = base_swap_total_kb * (((index * 7) % 50) / 100.0)
+                cpu_pkg_c = 48.0 + ((index * 3) % 35)
+                nvme_c = 35.0 + ((index * 2) % 25)
+                nic_c = 45.0 + ((index * 4) % 30)
+                chipset_c = 32.0 + ((index * 2) % 18)
+                power_w = 220.0 + cpu * 4.2
+                fan_min = 5400.0 + (index % 7) * 230.0
+                fan_max = fan_min + 2600.0
+                fan_avg = (fan_min + fan_max) / 2.0
+                fan_count = 12.0
+                fan_ok = fan_count if index % 11 else fan_count - 1
                 received_at = now - (index % 5) * 8000
 
                 snapshot = {
@@ -182,6 +192,35 @@ class StateStore:
                         {"module": "memory", "name": "total", "value": base_total_mem_kb, "unit": "kb"},
                         {"module": "memory", "name": "swap_used", "value": swap_used_kb, "unit": "kb"},
                         {"module": "memory", "name": "swap_total", "value": base_swap_total_kb, "unit": "kb"},
+                        {"module": "thermal", "name": "available", "value": 1.0, "unit": "bool"},
+                        {"module": "thermal", "name": "cpu_warn_c", "value": 80.0, "unit": "celsius"},
+                        {"module": "thermal", "name": "cpu_crit_c", "value": 90.0, "unit": "celsius"},
+                        {"module": "thermal", "name": "nvme_warn_c", "value": 70.0, "unit": "celsius"},
+                        {"module": "thermal", "name": "nvme_crit_c", "value": 80.0, "unit": "celsius"},
+                        {"module": "thermal", "name": "nic_warn_c", "value": 85.0, "unit": "celsius"},
+                        {"module": "thermal", "name": "nic_crit_c", "value": 95.0, "unit": "celsius"},
+                        {"module": "thermal", "name": "chipset_warn_c", "value": 75.0, "unit": "celsius"},
+                        {"module": "thermal", "name": "chipset_crit_c", "value": 85.0, "unit": "celsius"},
+                        {"module": "thermal", "name": "cpu_package0_c", "value": cpu_pkg_c, "unit": "celsius"},
+                        {"module": "thermal", "name": "cpu_package_max_c", "value": cpu_pkg_c, "unit": "celsius"},
+                        {"module": "thermal", "name": "cpu_alert_level", "value": 1.0 if cpu_pkg_c >= 80.0 else 0.0, "unit": "level"},
+                        {"module": "thermal", "name": "nvme_max_c", "value": nvme_c, "unit": "celsius"},
+                        {"module": "thermal", "name": "nvme_alert_level", "value": 1.0 if nvme_c >= 70.0 else 0.0, "unit": "level"},
+                        {"module": "thermal", "name": "nic_max_c", "value": nic_c, "unit": "celsius"},
+                        {"module": "thermal", "name": "nic_alert_level", "value": 1.0 if nic_c >= 85.0 else 0.0, "unit": "level"},
+                        {"module": "thermal", "name": "chipset_c", "value": chipset_c, "unit": "celsius"},
+                        {"module": "thermal", "name": "chipset_alert_level", "value": 1.0 if chipset_c >= 75.0 else 0.0, "unit": "level"},
+                        {"module": "power", "name": "available", "value": 1.0, "unit": "bool"},
+                        {"module": "power", "name": "watts", "value": power_w, "unit": "watt"},
+                        {"module": "power", "name": "avg_watts", "value": power_w, "unit": "watt"},
+                        {"module": "power", "name": "max_watts", "value": power_w, "unit": "watt"},
+                        {"module": "power", "name": "sensor_count", "value": 1.0, "unit": "count"},
+                        {"module": "fan", "name": "available", "value": 1.0, "unit": "bool"},
+                        {"module": "fan", "name": "count", "value": fan_count, "unit": "count"},
+                        {"module": "fan", "name": "ok_count", "value": fan_ok, "unit": "count"},
+                        {"module": "fan", "name": "min_rpm", "value": fan_min, "unit": "rpm"},
+                        {"module": "fan", "name": "max_rpm", "value": fan_max, "unit": "rpm"},
+                        {"module": "fan", "name": "avg_rpm", "value": fan_avg, "unit": "rpm"},
                     ],
                 }
                 self._nodes[node_id] = {"latest": snapshot, "history": [snapshot]}

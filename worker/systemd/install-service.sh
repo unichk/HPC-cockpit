@@ -56,6 +56,20 @@ run_cmd() {
   fi
 }
 
+refresh_ipmi_cache() {
+  local cache_dir="/root/.freeipmi/sdr-cache"
+  if ${DRY_RUN}; then
+    echo "[dry-run] rm -rf ${cache_dir}"
+    echo "[dry-run] ipmi-sensors --sensor-type=Fan >/dev/null 2>&1 || true"
+    return
+  fi
+
+  rm -rf "${cache_dir}"
+  if command -v ipmi-sensors >/dev/null 2>&1; then
+    ipmi-sensors --sensor-type=Fan >/dev/null 2>&1 || true
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary)
@@ -160,6 +174,7 @@ run_cmd mkdir -p "${CONFIG_DIR}" "${STATE_DIR}"
 run_cmd install -m 0755 "${BIN_SRC}" "${BIN_DST}"
 run_cmd install -m 0644 "${SERVICE_SRC}" "${UNIT_DST}"
 run_cmd install -m 0644 "${CONFIG_SRC}" "${CONFIG_DST}"
+refresh_ipmi_cache
 
 run_cmd systemctl daemon-reload
 
