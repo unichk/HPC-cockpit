@@ -1,30 +1,55 @@
-# HPC Cluster Monitor: Laptop UI + Ultra‑Light Workers
+# HPC Cluster Monitor Architecture
 
-## Architecture (minimal)
+## Current repository status
 
-- **Worker (every node):** read a small set of kernel counters (`/proc`, `/sys`) on a fixed interval (e.g., 5s), batch a few samples, send to the laptop.
-- **Laptop server:** ingest → store time-series on disk → compute aggregates/graphs → serve UI.
-- **Typical HPC wiring:** if nodes can’t reach your laptop directly, use a **login/head node as a dumb relay** (forward packets/streams; no DB, no analytics).
+Implemented now:
+- Modular C++ worker with pluggable collectors and transports.
+- Built-in collectors: `cpu`, `memory`, `load`.
+- Built-in transports: `stdout`, `udp`.
+- System `systemd` service support (`hpc-worker.service`) with root runtime.
 
-Worker rules to stay lightweight:
-- No per-process scanning by default, no frequent vendor CLIs, no unbounded buffering (drop when offline).
+Not implemented yet:
+- Central server and UI.
+- Disk/network/GPU collectors.
+- Privilege split between main worker and root-only helper.
 
-## What to collect (monitoring-only)
+## Runtime model
 
-Include these fields in every sample:
-- **Identity/health:** `node_id`, `timestamp`, `uptime`, `boot_id` (or similar), agent version, “last error / drops”.
+- One worker process per node.
+- Worker reads lightweight kernel data (`/proc`, `/sys`) on a fixed interval.
+- Worker sends one snapshot each interval.
+- Main deployment path is a system service with restart and `journald` logs.
 
-Core metrics (cheap, high value):
-- **CPU:** total utilization split (user/system/iowait/idle), load average, runnable threads (optional).
-- **Memory:** total, used, available, swap used, major page faults (optional).
-- **Disk capacity:** per mount (used/free, inode usage).
-- **Disk I/O (counters):** read/write bytes, IOPS, queue time if available.
-- **Network (counters):** rx/tx bytes, packets, errors/drops per interface.
+## Transport and wire contract (current)
 
-Optional (enable only if you need it):
-- **GPU:** utilization, memory used, temperature, power draw (if available cheaply).
-- **Scheduler context (Slurm/PBS):** current job id(s) on node, user, partition/queue (avoid high-frequency queries).
-- **Temps/power/IPMI:** usually privileged and heavier; keep off by default.
+- Recommended current transport for remote receive: `udp`.
+- `udp` sends one JSON snapshot per datagram to configured IPv4 `host:port`.
+- Payload fields:
+  - `node_id` (defaults to hostname if omitted in config)
+  - `timestamp_ms`
+  - `metrics[]` with `{module,name,value,unit}`
+- Delivery semantics: at-most-once, lossy under congestion/network issues.
 
-Practical sampling defaults:
-- **5s** for “live dashboard”, **15–30s** for long-term trends; send in small batches (e.g., 3–10 samples).
+## Lightweight worker principles
+
+- No per-process scans by default.
+- No expensive vendor CLI calls in the hot path.
+- Small fixed work per interval.
+- Keep heavy analytics/query/UI on the future server side.
+
+## Metrics scope
+
+Current metrics:
+- CPU usage and iowait percent.
+- Memory used/available and swap usage.
+- Load average (1m/5m/15m).
+
+Planned next metrics:
+- Disk capacity and I/O counters.
+- Network counters.
+- Optional GPU/scheduler/IPMI modules as opt-in.
+
+## Network topology guidance
+
+- Direct node -> laptop/server receive is simplest when routing allows.
+- If compute nodes cannot reach laptop directly, use a login/head-node relay.

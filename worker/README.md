@@ -110,7 +110,20 @@ Protocol contract:
 Receiver quick test:
 
 ```bash
+nc -u -l -p 9000
+```
+
+If your `nc` uses OpenBSD-style flags:
+
+```bash
 nc -u -l 9000
+```
+
+Troubleshooting:
+- `nc -lnvp 9000` listens on TCP. UDP transport requires `-u`.
+- After config changes under service mode, run `sudo systemctl restart hpc-worker`.
+- Check worker logs with `sudo journalctl -u hpc-worker -f`.
+- Verify packets on receiver with `sudo tcpdump -n -i any udp port 9000`.
 ```
 
 ## Extend collectors
