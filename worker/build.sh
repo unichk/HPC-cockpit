@@ -11,6 +11,7 @@ if command -v cmake >/dev/null 2>&1; then
   cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}"
   cmake --build "${BUILD_DIR}" -j
   echo "Built with cmake: ${BIN_PATH}"
+  echo "Service installer: ${ROOT_DIR}/systemd/install-service.sh"
   exit 0
 fi
 
@@ -29,3 +30,4 @@ g++ -std=c++17 -Wall -Wextra -Wpedantic \
   -o "${BIN_PATH}"
 
 echo "Built with g++: ${BIN_PATH}"
+echo "Service installer: ${ROOT_DIR}/systemd/install-service.sh"

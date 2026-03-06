@@ -1,0 +1,18 @@
+[Unit]
+Description=HPC Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/var/lib/hpc-worker
+ExecStart=/usr/local/bin/hpc_worker /etc/hpc-worker/worker.conf
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

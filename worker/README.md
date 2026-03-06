@@ -21,6 +21,61 @@ cd worker
 ./build/hpc_worker config/worker.conf
 ```
 
+## Run As Service (`systemd`, root runtime)
+
+This worker can run as a system service with `journald` logging and auto-restart.
+
+Build first:
+
+```bash
+cd worker
+./build.sh
+```
+
+Install service files (requires root):
+
+```bash
+sudo ./systemd/install-service.sh --enable --start
+```
+
+Service operations:
+
+```bash
+sudo systemctl status hpc-worker
+sudo systemctl restart hpc-worker
+sudo systemctl stop hpc-worker
+sudo systemctl start hpc-worker
+```
+
+Logs:
+
+```bash
+sudo journalctl -u hpc-worker -f
+```
+
+Uninstall service:
+
+```bash
+sudo ./systemd/uninstall-service.sh
+```
+
+Purge service + config + state:
+
+```bash
+sudo ./systemd/uninstall-service.sh --purge
+```
+
+Dry-run install/uninstall:
+
+```bash
+sudo ./systemd/install-service.sh --dry-run --enable --start
+sudo ./systemd/uninstall-service.sh --dry-run --purge
+```
+
+Root runtime note:
+- The service runs as root now to support future root-only collectors.
+- A later hardening step can split privileged collectors into a narrow helper while keeping the main worker unprivileged.
+
 ## Config format
 
 `config/worker.conf` uses `key=value`:
