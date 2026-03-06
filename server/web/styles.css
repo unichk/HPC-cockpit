@@ -127,6 +127,31 @@ body {
 
 .summary-item.power-only {
   align-items: flex-end;
+  padding: 4px 10px;
+  border-radius: 12px;
+  border: 2px solid transparent;
+}
+
+.summary-item.power-only.warn {
+  border-color: #f2b84b;
+  background: rgba(242, 184, 75, 0.08);
+}
+
+.summary-item.power-only.alert {
+  border-color: #c72c74;
+  background: rgba(199, 44, 116, 0.1);
+}
+
+.summary-item.power-only.warn .number-display {
+  color: #f2b84b;
+}
+
+.summary-item.power-only.warn .suffix {
+  color: #f2b84b;
+}
+
+.summary-item.power-only.alert .number-display {
+  color: #c72c74;
 }
 
 .node-grid {

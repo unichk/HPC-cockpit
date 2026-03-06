@@ -299,6 +299,7 @@ function renderSummary(nodes, details) {
   let healthText = "Systems All Good";
   let healthColor = "var(--light-green)";
   const staleCount = nodes.filter((node) => node.age_ms >= thresholds.age_stale_ms).length;
+  const delayedCount = nodes.filter((node) => node.age_ms >= thresholds.age_warn_ms && node.age_ms < thresholds.age_stale_ms).length;
   const hotCount = cpuValues.filter((value) => value >= thresholds.cpu_hot_pct).length;
   const hasAgeWarn = nodes.some((node) => node.age_ms >= thresholds.age_warn_ms);
   const hasCpuWarn = cpuValues.some((value) => value >= thresholds.cpu_warn_pct);
@@ -306,6 +307,11 @@ function renderSummary(nodes, details) {
     const metrics = detail.latest.metrics;
     const cpu = metricValueAny(metrics, "thermal", ["cpu_package_max_c", "cpu_package0_c"]);
     return cpu >= thresholds.cpu_temp_crit_c;
+  });
+  const hasThermalWarn = details.some((detail) => {
+    const metrics = detail.latest.metrics;
+    const cpu = metricValueAny(metrics, "thermal", ["cpu_package_max_c", "cpu_package0_c"]);
+    return cpu >= thresholds.cpu_temp_warn_c;
   });
   const hasFanDegraded = details.some((detail) => {
     const metrics = detail.latest.metrics;
@@ -318,22 +324,47 @@ function renderSummary(nodes, details) {
   const hasNodePowerWarn = details.some((detail) => metricValue(detail.latest.metrics, "power", "watts") >= thresholds.node_power_warn_w);
   const hasTotalPowerHot = totalPowerWatts >= thresholds.total_power_hot_w;
   const hasTotalPowerWarn = totalPowerWatts >= thresholds.total_power_warn_w;
+  const powerSummary = document.getElementById("power-summary");
+  const powerNumber = powerSummary.querySelector(".number-display");
+  const powerSuffix = powerSummary.querySelector(".suffix");
 
-  if (hotCount > 0 || hasThermalCrit || hasFanDegraded || hasNodePowerHot || hasTotalPowerHot) {
-    healthText = "Alert Detected";
+  const criticalIssues = [];
+  const warningIssues = [];
+
+  if (staleCount > 0) criticalIssues.push(`No response stale:${staleCount}`);
+  if (hotCount > 0) criticalIssues.push(`CPU hot:${hotCount}`);
+  if (hasThermalCrit) criticalIssues.push("CPU temp crit");
+  if (hasFanDegraded) criticalIssues.push("Fan OK ratio warn");
+  if (hasNodePowerHot) criticalIssues.push("Node power hot");
+  if (hasTotalPowerHot) criticalIssues.push("Total power hot");
+
+  if (delayedCount > 0) warningIssues.push(`No response warn:${delayedCount}`);
+  if (hasCpuWarn && hotCount === 0) warningIssues.push("CPU warn");
+  if (hasThermalWarn && !hasThermalCrit) warningIssues.push("CPU temp warn");
+  if (hasNodePowerWarn && !hasNodePowerHot) warningIssues.push("Node power warn");
+  if (hasTotalPowerWarn && !hasTotalPowerHot) warningIssues.push("Total power warn");
+
+  if (criticalIssues.length > 0) {
+    healthText = criticalIssues.concat(warningIssues).join(" • ");
     healthColor = "var(--sweet-peony)";
-  } else if (staleCount > 0) {
-    healthText = "Worker Not Responding";
-    healthColor = "var(--sweet-peony)";
-  } else if (hasAgeWarn && !hasCpuWarn) {
-    healthText = "Worker Not Responding";
-    healthColor = "#f2b84b";
-  } else if (hasAgeWarn || hasCpuWarn || hasNodePowerWarn || hasTotalPowerWarn) {
-    healthText = "Load Elevated";
+  } else if (warningIssues.length > 0 || hasAgeWarn) {
+    healthText = warningIssues.join(" • ") || "Load Elevated";
     healthColor = "#f2b84b";
   }
 
   document.getElementById("power-draw").textContent = fmtNumber(totalPowerWatts, 0);
+  powerSummary.classList.remove("warn", "alert");
+  powerNumber.style.color = "";
+  powerSuffix.style.color = "";
+  if (hasTotalPowerHot) {
+    powerSummary.classList.add("alert");
+    powerNumber.style.color = "#c72c74";
+    powerSuffix.style.color = "#c72c74";
+  } else if (hasTotalPowerWarn) {
+    powerSummary.classList.add("warn");
+    powerNumber.style.color = "#f2b84b";
+    powerSuffix.style.color = "#f2b84b";
+  }
   document.getElementById("cluster-meta").textContent = healthText;
   document.getElementById("cluster-meta").style.color = healthColor;
   document.getElementById("brand-status-dot").style.background = healthColor;
