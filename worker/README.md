@@ -4,7 +4,7 @@ This is a lightweight worker designed for HPC nodes.
 
 - Collectors are modular (`cpu`, `memory`, `load` built in).
 - Transport is pluggable (`stdout`, `udp` built in).
-- Server is intentionally not included yet.
+- Server/UI lives in `../server`.
 
 ## Build
 
@@ -25,10 +25,10 @@ cd worker
 
 This worker can run as a system service with `journald` logging and auto-restart.
 
-Install service files (requires root, rebuilds worker first):
+Install service files (requires root, rebuilds worker first, enables + starts by default):
 
 ```bash
-sudo ./systemd/install-service.sh --enable --start
+sudo ./systemd/install-service.sh
 ```
 
 Service operations:
@@ -46,23 +46,29 @@ Logs:
 sudo journalctl -u hpc-worker -f
 ```
 
-Uninstall service:
+Uninstall service (always purges config + state):
 
 ```bash
 sudo ./systemd/uninstall-service.sh
 ```
 
-Purge service + config + state:
-
-```bash
-sudo ./systemd/uninstall-service.sh --purge
-```
-
 Dry-run install/uninstall:
 
 ```bash
-sudo ./systemd/install-service.sh --dry-run --enable --start
-sudo ./systemd/uninstall-service.sh --dry-run --purge
+sudo ./systemd/install-service.sh --dry-run
+sudo ./systemd/uninstall-service.sh --dry-run
+```
+
+Skip auto-enable/start if needed:
+
+```bash
+sudo ./systemd/install-service.sh --no-enable --no-start
+```
+
+Keep existing config/state during reinstall:
+
+```bash
+sudo ./systemd/install-service.sh --no-clean-reinstall
 ```
 
 Root runtime note:
@@ -124,7 +130,6 @@ Troubleshooting:
 - After config changes under service mode, run `sudo systemctl restart hpc-worker`.
 - Check worker logs with `sudo journalctl -u hpc-worker -f`.
 - Verify packets on receiver with `sudo tcpdump -n -i any udp port 9000`.
-```
 
 ## Extend collectors
 

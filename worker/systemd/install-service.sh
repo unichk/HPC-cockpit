@@ -16,10 +16,11 @@ UNIT_DST="/etc/systemd/system/hpc-worker.service"
 
 BIN_SRC="${DEFAULT_BIN}"
 CONFIG_SRC="${DEFAULT_CONFIG}"
-ENABLE=false
-START=false
+ENABLE=true
+START=true
 DRY_RUN=false
 SKIP_BUILD=false
+CLEAN_REINSTALL=true
 
 usage() {
   cat <<EOF
@@ -28,9 +29,13 @@ Usage: $0 [options]
 Options:
   --binary <path>       Source worker binary (default: ${DEFAULT_BIN})
   --config <path>       Source config file (default: ${DEFAULT_CONFIG})
+  --clean-reinstall     Purge old install before install (default: enabled)
+  --no-clean-reinstall  Keep old config/state during install
   --skip-build          Skip rebuild step before install
-  --enable              Run: systemctl enable hpc-worker
-  --start               Run: systemctl start hpc-worker
+  --enable              Enable service after install (default: enabled)
+  --start               Start service after install (default: started)
+  --no-enable           Do not enable service after install
+  --no-start            Do not start service after install
   --dry-run             Print actions without changing system files
   -h, --help            Show this help
 EOF
@@ -65,12 +70,28 @@ while [[ $# -gt 0 ]]; do
       ENABLE=true
       shift
       ;;
+    --clean-reinstall)
+      CLEAN_REINSTALL=true
+      shift
+      ;;
+    --no-clean-reinstall)
+      CLEAN_REINSTALL=false
+      shift
+      ;;
+    --no-enable)
+      ENABLE=false
+      shift
+      ;;
     --skip-build)
       SKIP_BUILD=true
       shift
       ;;
     --start)
       START=true
+      shift
+      ;;
+    --no-start)
+      START=false
       shift
       ;;
     --dry-run)
@@ -118,15 +139,27 @@ if [[ ! -f "${CONFIG_SRC}" ]]; then
   exit 2
 fi
 
+if ${CLEAN_REINSTALL}; then
+  if run_cmd systemctl is-active hpc-worker >/dev/null 2>&1; then
+    run_cmd systemctl stop hpc-worker
+  fi
+  if run_cmd systemctl is-enabled hpc-worker >/dev/null 2>&1; then
+    run_cmd systemctl disable hpc-worker
+  fi
+  if [[ -f "${UNIT_DST}" ]]; then
+    run_cmd rm -f "${UNIT_DST}"
+  fi
+  if [[ -f "${BIN_DST}" ]]; then
+    run_cmd rm -f "${BIN_DST}"
+  fi
+  run_cmd rm -rf "${CONFIG_DIR}" "${STATE_DIR}"
+  run_cmd systemctl daemon-reload
+fi
+
 run_cmd mkdir -p "${CONFIG_DIR}" "${STATE_DIR}"
 run_cmd install -m 0755 "${BIN_SRC}" "${BIN_DST}"
 run_cmd install -m 0644 "${SERVICE_SRC}" "${UNIT_DST}"
-
-if [[ -f "${CONFIG_DST}" ]]; then
-  echo "config exists, leaving as-is: ${CONFIG_DST}"
-else
-  run_cmd install -m 0644 "${CONFIG_SRC}" "${CONFIG_DST}"
-fi
+run_cmd install -m 0644 "${CONFIG_SRC}" "${CONFIG_DST}"
 
 run_cmd systemctl daemon-reload
 
@@ -142,3 +175,8 @@ echo "service installed: ${UNIT_DST}"
 echo "binary installed: ${BIN_DST}"
 echo "config path: ${CONFIG_DST}"
 echo "state dir: ${STATE_DIR}"
+if ${CLEAN_REINSTALL}; then
+  echo "install mode: clean reinstall (old config/state purged)"
+else
+  echo "install mode: in-place install (config/state preserved)"
+fi

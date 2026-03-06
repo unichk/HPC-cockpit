@@ -24,9 +24,9 @@ class LoadCollector : public Collector {
       return false;
     }
 
-    out.push_back(Metric{"load", "1m", load1, "ratio"});
-    out.push_back(Metric{"load", "5m", load5, "ratio"});
-    out.push_back(Metric{"load", "15m", load15, "ratio"});
+    out.push_back(Metric{"load", "avg1", load1, "ratio"});
+    out.push_back(Metric{"load", "avg5", load5, "ratio"});
+    out.push_back(Metric{"load", "avg15", load15, "ratio"});
     return true;
   }
 };

@@ -38,6 +38,13 @@ int main(int argc, char** argv) {
     collectors.push_back(std::move(collector));
   }
 
+  if (config.transport == "udp") {
+    std::cout << "transport_start udp destination=" << config.transport_udp_host << ":"
+              << config.transport_udp_port << std::endl;
+  } else {
+    std::cout << "transport_start " << config.transport << std::endl;
+  }
+
   Worker worker(std::move(config), std::move(collectors), std::move(transport));
   return worker.Run();
 }

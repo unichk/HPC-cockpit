@@ -9,7 +9,6 @@ Implemented now:
 - System `systemd` service support (`hpc-worker.service`) with root runtime.
 
 Not implemented yet:
-- Central server and UI.
 - Disk/network/GPU collectors.
 - Privilege split between main worker and root-only helper.
 
@@ -40,9 +39,9 @@ Not implemented yet:
 ## Metrics scope
 
 Current metrics:
-- CPU usage and iowait percent.
-- Memory used/available and swap usage.
-- Load average (1m/5m/15m).
+- CPU usage.
+- Load averages (avg1/avg5/avg15).
+- Memory used/total and swap used/total.
 
 Planned next metrics:
 - Disk capacity and I/O counters.

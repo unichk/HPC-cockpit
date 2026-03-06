@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HPC Cockpit</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&display=swap" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="pebble-card topbar">
+      <div class="brand">
+        <div class="brand-icon">
+          <span class="material-symbols-outlined">grid_view</span>
+        </div>
+        <div>
+          <h1>HPC Cockpit</h1>
+          <div class="brand-status">
+            <span id="brand-status-dot" class="status-dot"></span>
+            <span id="cluster-meta">Loading cluster status...</span>
+          </div>
+        </div>
+      </div>
+      <div class="summary">
+        <div class="summary-item power-only">
+          <span class="modern-label">Power Draw</span>
+          <span class="number-display"><span id="power-draw">0.0</span><span class="suffix">kW</span></span>
+        </div>
+      </div>
+    </header>
+
+    <main id="node-grid" class="node-grid"></main>
+
+    <footer class="footer">
+      <div class="footer-left">
+        <span id="uptime-indicator">Uptime: --</span>
+        <span id="security-indicator">Ingest: --</span>
+      </div>
+      <div class="footer-right">
+        <span id="latency-indicator">Latency: --</span>
+        <span>HPC Cockpit</span>
+      </div>
+    </footer>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

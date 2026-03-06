@@ -39,17 +39,14 @@ class CpuCollector : public Collector {
     if (!has_prev_) {
       prev_total_ = total;
       prev_idle_ = idle_all;
-      prev_iowait_ = iowait;
       has_prev_ = true;
       return true;
     }
 
     const unsigned long long total_delta = total - prev_total_;
     const unsigned long long idle_delta = idle_all - prev_idle_;
-    const unsigned long long iowait_delta = iowait - prev_iowait_;
     prev_total_ = total;
     prev_idle_ = idle_all;
-    prev_iowait_ = iowait;
 
     if (total_delta == 0) {
       return true;
@@ -58,9 +55,6 @@ class CpuCollector : public Collector {
     const double usage_pct = 100.0 * static_cast<double>(total_delta - idle_delta) /
                              static_cast<double>(total_delta);
     out.push_back(Metric{"cpu", "usage", usage_pct, "percent"});
-    out.push_back(Metric{"cpu", "iowait", 100.0 * static_cast<double>(iowait_delta) /
-                                      static_cast<double>(total_delta),
-                         "percent"});
     return true;
   }
 
@@ -68,7 +62,6 @@ class CpuCollector : public Collector {
   bool has_prev_ = false;
   unsigned long long prev_total_ = 0;
   unsigned long long prev_idle_ = 0;
-  unsigned long long prev_iowait_ = 0;
 };
 
 }  // namespace

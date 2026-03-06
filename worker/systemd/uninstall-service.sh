@@ -6,7 +6,6 @@ CONFIG_DIR="/etc/hpc-worker"
 STATE_DIR="/var/lib/hpc-worker"
 UNIT_DST="/etc/systemd/system/hpc-worker.service"
 
-PURGE=false
 DRY_RUN=false
 
 usage() {
@@ -14,7 +13,6 @@ usage() {
 Usage: $0 [options]
 
 Options:
-  --purge               Remove config and state directories
   --dry-run             Print actions without changing system files
   -h, --help            Show this help
 EOF
@@ -37,10 +35,6 @@ run_cmd() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --purge)
-      PURGE=true
-      shift
-      ;;
     --dry-run)
       DRY_RUN=true
       shift
@@ -77,13 +71,7 @@ if [[ -f "${BIN_DST}" ]]; then
   run_cmd rm -f "${BIN_DST}"
 fi
 
-if ${PURGE}; then
-  run_cmd rm -rf "${CONFIG_DIR}" "${STATE_DIR}"
-fi
+run_cmd rm -rf "${CONFIG_DIR}" "${STATE_DIR}"
 
 echo "service uninstalled: ${UNIT_DST}"
-if ${PURGE}; then
-  echo "purged: ${CONFIG_DIR} ${STATE_DIR}"
-else
-  echo "left intact: ${CONFIG_DIR} ${STATE_DIR}"
-fi
+echo "purged: ${CONFIG_DIR} ${STATE_DIR}"

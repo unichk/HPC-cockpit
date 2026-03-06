@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import socketserver
+import threading
+import time
+from http import HTTPStatus
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+class StateStore:
+    def __init__(self, history_size: int) -> None:
+        self._history_size = history_size
+        self._lock = threading.Lock()
+        self._nodes = {}
+        self._ingest_count = 0
+        self._ingest_errors = 0
+
+    def ingest_snapshot(self, payload: bytes, remote_ip: str) -> None:
+        try:
+            parsed = json.loads(payload.decode("utf-8"))
+        except Exception:
+            with self._lock:
+                self._ingest_errors += 1
+            return
+
+        if not isinstance(parsed, dict):
+            with self._lock:
+                self._ingest_errors += 1
+            return
+
+        node_id = parsed.get("node_id")
+        if not isinstance(node_id, str) or not node_id.strip():
+            node_id = remote_ip
+
+        timestamp_ms = parsed.get("timestamp_ms")
+        if not isinstance(timestamp_ms, int):
+            timestamp_ms = now_ms()
+
+        metrics = parsed.get("metrics")
+        if not isinstance(metrics, list):
+            metrics = []
+
+        snapshot = {
+            "node_id": node_id,
+            "timestamp_ms": timestamp_ms,
+            "metrics": metrics,
+            "received_at_ms": now_ms(),
+            "remote_ip": remote_ip,
+        }
+
+        with self._lock:
+            self._ingest_count += 1
+            node_entry = self._nodes.get(node_id)
+            if node_entry is None:
+                node_entry = {"latest": snapshot, "history": [snapshot]}
+                self._nodes[node_id] = node_entry
+            else:
+                node_entry["latest"] = snapshot
+                node_entry["history"].append(snapshot)
+                if len(node_entry["history"]) > self._history_size:
+                    node_entry["history"] = node_entry["history"][-self._history_size :]
+
+    def health(self) -> dict:
+        with self._lock:
+            return {
+                "status": "ok",
+                "nodes": len(self._nodes),
+                "ingest_count": self._ingest_count,
+                "ingest_errors": self._ingest_errors,
+            }
+
+    def node_summaries(self) -> list:
+        current = now_ms()
+        with self._lock:
+            rows = []
+            for node_id, node_entry in self._nodes.items():
+                latest = node_entry["latest"]
+                age_ms = max(0, current - latest["received_at_ms"])
+                rows.append(
+                    {
+                        "node_id": node_id,
+                        "remote_ip": latest["remote_ip"],
+                        "timestamp_ms": latest["timestamp_ms"],
+                        "received_at_ms": latest["received_at_ms"],
+                        "age_ms": age_ms,
+                        "metric_count": len(latest["metrics"]),
+                    }
+                )
+        rows.sort(key=lambda item: item["node_id"])
+        return rows
+
+    def node_detail(self, node_id: str) -> dict:
+        with self._lock:
+            node_entry = self._nodes.get(node_id)
+            if node_entry is None:
+                return {}
+            return {
+                "node_id": node_id,
+                "latest": node_entry["latest"],
+                "history": list(node_entry["history"]),
+            }
+
+    def cluster_latest(self) -> dict:
+        with self._lock:
+            latest_snapshots = [entry["latest"] for entry in self._nodes.values()]
+
+        current = now_ms()
+        aggregate = {}
+        for snapshot in latest_snapshots:
+            for metric in snapshot.get("metrics", []):
+                module = metric.get("module")
+                name = metric.get("name")
+                unit = metric.get("unit")
+                value = metric.get("value")
+                if (
+                    not isinstance(module, str)
+                    or not isinstance(name, str)
+                    or not isinstance(unit, str)
+                    or not isinstance(value, (int, float))
+                ):
+                    continue
+                key = (module, name, unit)
+                aggregate[key] = aggregate.get(key, 0.0) + float(value)
+
+        metrics = []
+        for key, value in aggregate.items():
+            module, name, unit = key
+            metrics.append({"module": module, "name": name, "unit": unit, "sum": value})
+        metrics.sort(key=lambda item: (item["module"], item["name"], item["unit"]))
+
+        return {
+            "timestamp_ms": current,
+            "node_count": len(latest_snapshots),
+            "metrics": metrics,
+        }
+
+
+class UdpHandler(socketserver.BaseRequestHandler):
+    state: StateStore = None
+
+    def handle(self) -> None:
+        payload = self.request[0]
+        remote_ip = self.client_address[0]
+        self.state.ingest_snapshot(payload, remote_ip)
+
+
+class ApiHandler(SimpleHTTPRequestHandler):
+    state: StateStore = None
+
+    def __init__(self, *args, **kwargs):
+        web_dir = kwargs.pop("web_dir")
+        super().__init__(*args, directory=web_dir, **kwargs)
+
+    def do_GET(self) -> None:
+        if self.path == "/api/health":
+            self._json(self.state.health())
+            return
+
+        if self.path == "/api/nodes":
+            self._json({"nodes": self.state.node_summaries()})
+            return
+
+        if self.path == "/api/cluster":
+            self._json(self.state.cluster_latest())
+            return
+
+        if self.path.startswith("/api/node/"):
+            node_id = unquote(self.path[len("/api/node/") :])
+            detail = self.state.node_detail(node_id)
+            if not detail:
+                self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._json(detail)
+            return
+
+        if self.path == "/":
+            self.path = "/index.html"
+        return super().do_GET()
+
+    def _json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
+        encoded = json.dumps(payload).encode("utf-8")
+        self.send_response(status.value)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+
+def start_udp_server(bind_host: str, bind_port: int, state: StateStore) -> socketserver.ThreadingUDPServer:
+    UdpHandler.state = state
+    udp_server = socketserver.ThreadingUDPServer((bind_host, bind_port), UdpHandler)
+    udp_server.daemon_threads = True
+    return udp_server
+
+
+def start_http_server(bind_host: str, bind_port: int, state: StateStore, web_dir: str) -> ThreadingHTTPServer:
+    ApiHandler.state = state
+
+    def factory(*args, **kwargs):
+        return ApiHandler(*args, web_dir=web_dir, **kwargs)
+
+    return ThreadingHTTPServer((bind_host, bind_port), factory)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="HPC Cockpit UDP ingest server + Web UI")
+    parser.add_argument("--udp-host", default="0.0.0.0", help="UDP bind host (default: 0.0.0.0)")
+    parser.add_argument("--udp-port", type=int, default=9000, help="UDP bind port (default: 9000)")
+    parser.add_argument("--http-host", default="0.0.0.0", help="HTTP bind host (default: 0.0.0.0)")
+    parser.add_argument("--http-port", type=int, default=8080, help="HTTP bind port (default: 8080)")
+    parser.add_argument("--history-size", type=int, default=120, help="Snapshots kept per node")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if args.udp_port <= 0 or args.udp_port > 65535:
+        print("error: udp-port must be between 1 and 65535")
+        return 2
+    if args.http_port <= 0 or args.http_port > 65535:
+        print("error: http-port must be between 1 and 65535")
+        return 2
+    if args.history_size <= 0:
+        print("error: history-size must be > 0")
+        return 2
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    web_dir = os.path.join(base_dir, "web")
+    state = StateStore(history_size=args.history_size)
+
+    udp_server = start_udp_server(args.udp_host, args.udp_port, state)
+    http_server = start_http_server(args.http_host, args.http_port, state, web_dir)
+
+    udp_thread = threading.Thread(target=udp_server.serve_forever, daemon=True)
+    udp_thread.start()
+
+    print(
+        f"udp_listen={args.udp_host}:{args.udp_port} "
+        f"http_listen={args.http_host}:{args.http_port} web_dir={web_dir}"
+    )
+
+    try:
+        http_server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        udp_server.shutdown()
+        http_server.shutdown()
+        udp_server.server_close()
+        http_server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
