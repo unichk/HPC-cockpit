@@ -228,6 +228,105 @@ class StateStore:
 
         return {"fake_nodes": count}
 
+    def apply_warning_case(self, case_name: str) -> dict:
+        case = (case_name or "").strip().lower()
+        valid_cases = {
+            "reset",
+            "load_elevated_cpu",
+            "load_elevated_age",
+            "alert_cpu_hot",
+            "alert_stale",
+            "thermal_warn",
+            "thermal_crit",
+            "fan_degraded",
+        }
+        if case not in valid_cases:
+            return {"error": "unknown case"}
+
+        with self._lock:
+            fake_count = len(self._fake_node_ids)
+        if fake_count == 0:
+            self.set_fake_nodes(1)
+
+        with self._lock:
+            target_id = sorted(self._fake_node_ids)[0] if self._fake_node_ids else None
+            if not target_id:
+                return {"error": "no target node"}
+
+            now = now_ms()
+            for node_id in self._fake_node_ids:
+                entry = self._nodes.get(node_id)
+                if not entry:
+                    continue
+                latest = dict(entry["latest"])
+                latest["received_at_ms"] = now
+                latest["timestamp_ms"] = now
+                metrics = []
+                for item in latest.get("metrics", []):
+                    metric = dict(item)
+                    if metric.get("module") == "cpu" and metric.get("name") == "usage":
+                        metric["value"] = 25.0
+                    if metric.get("module") == "thermal":
+                        if metric.get("name") in {"cpu_alert_level", "nvme_alert_level", "nic_alert_level", "chipset_alert_level"}:
+                            metric["value"] = 0.0
+                        if metric.get("name") == "cpu_package0_c":
+                            metric["value"] = 54.0
+                        if metric.get("name") == "cpu_package_max_c":
+                            metric["value"] = 54.0
+                        if metric.get("name") == "nvme_max_c":
+                            metric["value"] = 39.0
+                        if metric.get("name") == "nic_max_c":
+                            metric["value"] = 53.0
+                        if metric.get("name") == "chipset_c":
+                            metric["value"] = 36.0
+                    if metric.get("module") == "fan":
+                        if metric.get("name") == "count":
+                            metric["value"] = 12.0
+                        if metric.get("name") == "ok_count":
+                            metric["value"] = 12.0
+                    metrics.append(metric)
+                latest["metrics"] = metrics
+                entry["latest"] = latest
+                entry["history"].append(latest)
+                if len(entry["history"]) > self._history_size:
+                    entry["history"] = entry["history"][-self._history_size :]
+
+            target = self._nodes[target_id]["latest"]
+            metrics_by_key = {(m.get("module"), m.get("name")): m for m in target.get("metrics", [])}
+
+            def set_metric(module: str, name: str, value: float) -> None:
+                item = metrics_by_key.get((module, name))
+                if item is not None:
+                    item["value"] = value
+
+            if case == "load_elevated_cpu":
+                set_metric("cpu", "usage", 85.0)
+            elif case == "load_elevated_age":
+                target["received_at_ms"] = now - 20000
+                target["timestamp_ms"] = now - 20000
+            elif case == "alert_cpu_hot":
+                set_metric("cpu", "usage", 97.0)
+            elif case == "alert_stale":
+                target["received_at_ms"] = now - 70000
+                target["timestamp_ms"] = now - 70000
+            elif case == "thermal_warn":
+                set_metric("thermal", "cpu_alert_level", 1.0)
+                set_metric("thermal", "cpu_package0_c", 82.0)
+                set_metric("thermal", "cpu_package_max_c", 82.0)
+            elif case == "thermal_crit":
+                set_metric("thermal", "cpu_alert_level", 2.0)
+                set_metric("thermal", "cpu_package0_c", 92.0)
+                set_metric("thermal", "cpu_package_max_c", 92.0)
+            elif case == "fan_degraded":
+                set_metric("fan", "count", 12.0)
+                set_metric("fan", "ok_count", 9.0)
+
+            self._nodes[target_id]["history"].append(dict(target))
+            if len(self._nodes[target_id]["history"]) > self._history_size:
+                self._nodes[target_id]["history"] = self._nodes[target_id]["history"][-self._history_size :]
+
+        return {"warning_case": case, "target_node": target_id}
+
 
 class UdpHandler(socketserver.BaseRequestHandler):
     state: StateStore = None
@@ -296,6 +395,31 @@ class ApiHandler(SimpleHTTPRequestHandler):
                 self._json({"error": "count must be integer"}, status=HTTPStatus.BAD_REQUEST)
                 return
             result = self.state.set_fake_nodes(count)
+            self._json(result)
+            return
+
+        if self.path == "/api/test/warning-case":
+            if not self.test_mode:
+                self._json({"error": "test mode disabled"}, status=HTTPStatus.FORBIDDEN)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except Exception:
+                self._json({"error": "invalid json"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            case = payload.get("case", "")
+            if not isinstance(case, str):
+                self._json({"error": "case must be string"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            result = self.state.apply_warning_case(case)
+            if "error" in result:
+                self._json(result, status=HTTPStatus.BAD_REQUEST)
+                return
             self._json(result)
             return
 

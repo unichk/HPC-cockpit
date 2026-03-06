@@ -26,6 +26,10 @@ function metricValue(metrics, moduleName, metricName) {
   return match ? match.value : 0;
 }
 
+function hasMetric(metrics, moduleName, metricName) {
+  return metrics.some((item) => item.module === moduleName && item.name === metricName && typeof item.value === "number");
+}
+
 function metricValueAny(metrics, moduleName, names) {
   for (const name of names) {
     const value = metricValue(metrics, moduleName, name);
@@ -44,10 +48,10 @@ function ringMarkup(percent, text, extraClass = "") {
 }
 
 const METRIC_POINTS = [
-  { id: "cpu_usage", label: "CPU usage" },
-  { id: "load_avg_triplet", label: "Load avg (1/5/15)" },
-  { id: "memory_used_total", label: "Memory (used/all)" },
-  { id: "swap_used_total", label: "Swap (used/all)" },
+  { id: "cpu_usage", label: "CPU" },
+  { id: "memory_used_total", label: "Memory" },
+  { id: "swap_used_total", label: "Swap" },
+  { id: "load_avg_triplet", label: "Load" },
   { id: "thermal", label: "Thermal" },
   { id: "fan", label: "Fan" },
 ];
@@ -183,12 +187,12 @@ function renderPointRow(pointId, metrics, alert) {
       <div class="metric-row">
         <div class="metric-head">
           <span class="metric-label"><span class="metric-main">Load</span></span>
+          <span class="load-triplet${alert ? " alert" : ""}">
+            <span class="load-chip"><span>1m</span><strong>${fmtNumber(load1, 2)}</strong></span>
+            <span class="load-chip"><span>5m</span><strong>${fmtNumber(load5, 2)}</strong></span>
+            <span class="load-chip"><span>15m</span><strong>${fmtNumber(load15, 2)}</strong></span>
+          </span>
         </div>
-        <span class="load-triplet${alert ? " alert" : ""}">
-          <span class="load-chip"><span>1m</span><strong>${fmtNumber(load1, 2)}</strong></span>
-          <span class="load-chip"><span>5m</span><strong>${fmtNumber(load5, 2)}</strong></span>
-          <span class="load-chip"><span>15m</span><strong>${fmtNumber(load15, 2)}</strong></span>
-        </span>
       </div>
     `;
   }
@@ -235,16 +239,16 @@ function renderPointRow(pointId, metrics, alert) {
     return `
       <div class="metric-row">
         <div class="metric-head">
-          <span class="metric-label"><span class="metric-main">Thermal</span></span>
+          <span class="metric-label"><span class="metric-main">Thermal</span><span class="metric-sub">°C</span></span>
         </div>
         ${
           !thermalAvailable
             ? '<div class="text-meta">Unavailable</div>'
             : `<div class="kv-list ${tone}">
-                <span>CPU <strong>${fmtNumber(cpuPkgMax, 1)}°C</strong></span>
-                <span>NVMe <strong>${fmtNumber(nvmeMax, 1)}°C</strong></span>
-                <span>NIC <strong>${fmtNumber(nicMax, 1)}°C</strong></span>
-                <span>PCH <strong>${fmtNumber(chipset, 1)}°C</strong></span>
+                <span>CPU <strong>${fmtNumber(cpuPkgMax, 1)}</strong></span>
+                <span>NVMe <strong>${fmtNumber(nvmeMax, 1)}</strong></span>
+                <span>NIC <strong>${fmtNumber(nicMax, 1)}</strong></span>
+                <span>PCH <strong>${fmtNumber(chipset, 1)}</strong></span>
               </div>`
         }
       </div>
@@ -262,17 +266,17 @@ function renderPointRow(pointId, metrics, alert) {
     const minKrpm = minRpm / 1000.0;
     const maxKrpm = maxRpm / 1000.0;
     return `
-      <div class="metric-row fan-row">
+      <div class="metric-row">
         <div class="metric-head">
-          <span class="metric-label"><span class="metric-main">Fan</span></span>
+          <span class="metric-label"><span class="metric-main">Fan</span><span class="metric-sub">kRPM</span></span>
         </div>
         ${
           !fanAvailable
             ? '<div class="text-meta">Unavailable</div>'
-            : `<div class="kv-list fan-inline${fanAlert ? " crit" : ""}">
-                <span>A <strong>${fmtNumber(avgKrpm, 2)}k</strong></span>
-                <span>Mn <strong>${fmtNumber(minKrpm, 2)}k</strong></span>
-                <span>Mx <strong>${fmtNumber(maxKrpm, 2)}k</strong></span>
+            : `<div class="kv-list${fanAlert ? " crit" : ""}">
+                <span>Avg <strong>${fmtNumber(avgKrpm, 2)}</strong></span>
+                <span>Min <strong>${fmtNumber(minKrpm, 2)}</strong></span>
+                <span>Max <strong>${fmtNumber(maxKrpm, 2)}</strong></span>
                 <span>OK <strong>${fmtNumber(okCount, 0)}/${fmtNumber(fanCount, 0)}</strong></span>
               </div>`
         }
@@ -281,6 +285,13 @@ function renderPointRow(pointId, metrics, alert) {
   }
 
   return "";
+}
+
+function pointHasData(pointId, metrics) {
+  if (pointId === "cpu_usage") return hasMetric(metrics, "cpu", "usage");
+  if (pointId === "memory_used_total") return hasMetric(metrics, "memory", "used") && hasMetric(metrics, "memory", "total");
+  if (pointId === "swap_used_total") return hasMetric(metrics, "memory", "swap_used") && hasMetric(metrics, "memory", "swap_total");
+  return true;
 }
 
 function renderCards(nodes, detailsById, selectedRows) {
@@ -303,7 +314,41 @@ function renderCards(nodes, detailsById, selectedRows) {
     const ageTone = ageClass(node.age_ms);
     const alert = stale || cpu >= 95;
 
-    const rowsHtml = selectedRows.map((row) => renderPointRow(row.id, metrics, alert)).join("") || "<div class=\"text-meta\">No metric selected</div>";
+    const topRowCandidates = ["cpu_usage", "memory_used_total", "swap_used_total"];
+    const selectedIds = new Set(selectedRows.map((row) => row.id));
+    const topRowIds = topRowCandidates.filter((id) => selectedIds.has(id) && pointHasData(id, metrics));
+    const topCols = Math.max(1, Math.min(3, topRowIds.length));
+
+    const topRowHtml =
+      topRowIds.length > 0
+        ? `<div class="metric-top-row cols-${topCols}">
+            ${topRowIds.map((id) => `<div class="metric-top-cell">${renderPointRow(id, metrics, alert)}</div>`).join("")}
+          </div>`
+        : "";
+
+    const loadVisible = selectedIds.has("load_avg_triplet");
+    const loadRowHtml = loadVisible
+      ? `<div class="metric-mid-row">
+          <div class="metric-mid-cell">${renderPointRow("load_avg_triplet", metrics, alert)}</div>
+        </div>`
+      : "";
+
+    const bottomRowIds = ["thermal", "fan"].filter((id) => selectedIds.has(id));
+    const bottomCols = Math.max(1, Math.min(2, bottomRowIds.length));
+    const bottomRowHtml =
+      bottomRowIds.length > 0
+        ? `<div class="metric-bottom-row cols-${bottomCols}">
+            ${bottomRowIds.map((id) => `<div class="metric-bottom-cell">${renderPointRow(id, metrics, alert)}</div>`).join("")}
+          </div>`
+        : "";
+
+    const extraRowsHtml = selectedRows
+      .filter((row) => !topRowCandidates.includes(row.id) && row.id !== "load_avg_triplet" && row.id !== "thermal" && row.id !== "fan")
+      .map((row) => renderPointRow(row.id, metrics, alert))
+      .join("");
+
+    const anySectionVisible = topRowHtml || loadRowHtml || bottomRowHtml || extraRowsHtml;
+    const metricsHtml = anySectionVisible ? `${loadRowHtml}${bottomRowHtml}${extraRowsHtml}` : "<div class=\"text-meta\">No metric selected</div>";
 
     const card = document.createElement("article");
     card.className = `pebble-card node-card${alert ? " alert" : ""}`;
@@ -323,9 +368,8 @@ function renderCards(nodes, detailsById, selectedRows) {
           </div>
         </div>
       </div>
-      <div class="metric-stack">
-        ${rowsHtml}
-      </div>
+      ${topRowHtml}
+      ${metricsHtml}
     `;
     grid.appendChild(card);
   }
@@ -388,6 +432,13 @@ async function setupTestPanel() {
         return;
       }
       await postJson("/api/test/fake-nodes", { count });
+      await refresh();
+    });
+
+    document.getElementById("apply-warning-case").addEventListener("click", async () => {
+      const select = document.getElementById("warning-case");
+      const warningCase = select.value || "reset";
+      await postJson("/api/test/warning-case", { case: warningCase });
       await refresh();
     });
   } catch (_) {

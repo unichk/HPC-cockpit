@@ -48,6 +48,18 @@
           <button id="metrics-none" class="panel-link" type="button">None</button>
         </div>
         <button id="apply-fake-nodes" type="button">Apply</button>
+        <label for="warning-case">Warning case</label>
+        <select id="warning-case">
+          <option value="reset">Reset</option>
+          <option value="load_elevated_cpu">Load Elevated (CPU)</option>
+          <option value="load_elevated_age">Load Elevated (Age)</option>
+          <option value="alert_cpu_hot">Alert (CPU Hot)</option>
+          <option value="alert_stale">Alert (Stale)</option>
+          <option value="thermal_warn">Thermal Warn</option>
+          <option value="thermal_crit">Thermal Critical</option>
+          <option value="fan_degraded">Fan Degraded</option>
+        </select>
+        <button id="apply-warning-case" type="button">Trigger Warning</button>
       </aside>
       <button id="show-test-panel" class="test-toggle hidden" type="button">Test</button>
     </div>

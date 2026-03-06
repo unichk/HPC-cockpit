@@ -60,6 +60,15 @@ bool IsAllDigits(const std::string& value) {
   return true;
 }
 
+bool ParseLeadingDouble(const std::string& value, double& out_value) {
+  std::stringstream stream(value);
+  stream >> out_value;
+  if (!stream.good() && !stream.eof()) {
+    return false;
+  }
+  return true;
+}
+
 std::string SanitizeName(const std::string& value) {
   std::string clean;
   clean.reserve(value.size());
@@ -106,24 +115,29 @@ class FanCollector : public Collector {
     int fallback_index = 0;
 
     while (std::getline(stream, line)) {
-      if (line.find("RPM") == std::string::npos) {
-        continue;
-      }
-
-      std::smatch match;
-      if (!std::regex_search(line, match, rpm_regex)) {
-        continue;
-      }
-      const double rpm = std::stod(match[1].str());
-
       std::string sensor_raw_name;
       const auto fields = SplitPipe(line);
-      if (fields.size() >= 2 && IsAllDigits(fields[0])) {
+      double rpm = 0.0;
+
+      if (fields.size() >= 5) {
+        if (!(IsAllDigits(fields[0]) && fields[4] == "RPM" && ParseLeadingDouble(fields[3], rpm))) {
+          continue;
+        }
         sensor_raw_name = fields[1];
-      } else if (!fields.empty()) {
-        sensor_raw_name = fields[0];
       } else {
-        sensor_raw_name = "fan_" + std::to_string(++fallback_index);
+        if (line.find("RPM") == std::string::npos) {
+          continue;
+        }
+        std::smatch match;
+        if (!std::regex_search(line, match, rpm_regex)) {
+          continue;
+        }
+        rpm = std::stod(match[1].str());
+        if (!fields.empty()) {
+          sensor_raw_name = fields[0];
+        } else {
+          sensor_raw_name = "fan_" + std::to_string(++fallback_index);
+        }
       }
 
       const std::string sensor_name = SanitizeName(sensor_raw_name);
@@ -138,7 +152,7 @@ class FanCollector : public Collector {
     if (rpms.empty()) {
       out.push_back(Metric{"fan", "available", 0.0, "bool"});
       if (last_available_) {
-        error = "ipmitool returned no RPM fan sensors";
+        error = "ipmi-sensors returned no RPM fan sensors";
         last_available_ = false;
         return false;
       }
