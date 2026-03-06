@@ -6,6 +6,7 @@ WORKER_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DEFAULT_BIN="${WORKER_DIR}/build/hpc_worker"
 DEFAULT_CONFIG="${WORKER_DIR}/config/worker.conf"
 SERVICE_SRC="${SCRIPT_DIR}/hpc-worker.service"
+BUILD_SCRIPT="${WORKER_DIR}/build.sh"
 
 BIN_DST="/usr/local/bin/hpc_worker"
 CONFIG_DIR="/etc/hpc-worker"
@@ -18,6 +19,7 @@ CONFIG_SRC="${DEFAULT_CONFIG}"
 ENABLE=false
 START=false
 DRY_RUN=false
+SKIP_BUILD=false
 
 usage() {
   cat <<EOF
@@ -26,6 +28,7 @@ Usage: $0 [options]
 Options:
   --binary <path>       Source worker binary (default: ${DEFAULT_BIN})
   --config <path>       Source config file (default: ${DEFAULT_CONFIG})
+  --skip-build          Skip rebuild step before install
   --enable              Run: systemctl enable hpc-worker
   --start               Run: systemctl start hpc-worker
   --dry-run             Print actions without changing system files
@@ -62,6 +65,10 @@ while [[ $# -gt 0 ]]; do
       ENABLE=true
       shift
       ;;
+    --skip-build)
+      SKIP_BUILD=true
+      shift
+      ;;
     --start)
       START=true
       shift
@@ -87,6 +94,18 @@ need_root
 if [[ ! -f "${SERVICE_SRC}" ]]; then
   echo "error: missing service unit template: ${SERVICE_SRC}"
   exit 2
+fi
+
+if ! ${SKIP_BUILD}; then
+  if [[ ! -x "${BUILD_SCRIPT}" ]]; then
+    echo "error: build script not found or not executable: ${BUILD_SCRIPT}"
+    exit 2
+  fi
+  if ${DRY_RUN}; then
+    echo "[dry-run] ${BUILD_SCRIPT}"
+  else
+    "${BUILD_SCRIPT}"
+  fi
 fi
 
 if [[ ! -x "${BIN_SRC}" ]]; then

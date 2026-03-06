@@ -4,6 +4,7 @@
 #include <cctype>
 #include <fstream>
 #include <sstream>
+#include <unistd.h>
 
 namespace {
 
@@ -30,6 +31,18 @@ std::vector<std::string> SplitCsv(const std::string& csv) {
     }
   }
   return values;
+}
+
+std::string DetectHostname() {
+  char hostname[256];
+  if (gethostname(hostname, sizeof(hostname)) != 0) {
+    return "unknown-node";
+  }
+  hostname[sizeof(hostname) - 1] = '\0';
+  if (hostname[0] == '\0') {
+    return "unknown-node";
+  }
+  return std::string(hostname);
 }
 
 }  // namespace
@@ -85,6 +98,9 @@ bool LoadConfig(const std::string& path, WorkerConfig& config, std::string& erro
   if (config.modules.empty()) {
     error = "modules cannot be empty";
     return false;
+  }
+  if (config.node_id.empty()) {
+    config.node_id = DetectHostname();
   }
   return true;
 }

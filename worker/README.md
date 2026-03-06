@@ -25,14 +25,7 @@ cd worker
 
 This worker can run as a system service with `journald` logging and auto-restart.
 
-Build first:
-
-```bash
-cd worker
-./build.sh
-```
-
-Install service files (requires root):
+Install service files (requires root, rebuilds worker first):
 
 ```bash
 sudo ./systemd/install-service.sh --enable --start
@@ -85,10 +78,11 @@ Root runtime note:
 - `transport`: transport adapter name
 - `modules`: comma-separated collector modules
 
+If `node_id` is omitted, worker uses the machine hostname.
+
 Example:
 
 ```text
-node_id=node-01
 interval_ms=5000
 transport=stdout
 modules=cpu,memory,load
