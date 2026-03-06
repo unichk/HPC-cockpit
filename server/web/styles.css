@@ -190,10 +190,64 @@ body {
   overflow-y: auto;
 }
 
-.test-panel {
+.threshold-panel {
   position: fixed;
   top: 96px;
   right: 20px;
+  width: 300px;
+  z-index: 19;
+  padding: 14px;
+  border-radius: 20px;
+  max-height: calc(100vh - 160px);
+  overflow: auto;
+}
+
+.threshold-panel-head h2 {
+  margin: 0 0 8px 0;
+  font-size: 1rem;
+}
+
+.threshold-panel label {
+  display: block;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 700;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.threshold-panel input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid rgba(79, 18, 113, 0.2);
+  border-radius: 8px;
+  font-family: inherit;
+  margin-bottom: 8px;
+}
+
+.threshold-actions {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.threshold-actions button {
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--indigo);
+  color: white;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.test-panel {
+  position: fixed;
+  top: 96px;
+  right: 332px;
   width: 300px;
   z-index: 20;
   padding: 18px;
@@ -226,6 +280,14 @@ body {
   letter-spacing: 0.08em;
 }
 
+.panel-hide-btn {
+  background: rgba(79, 18, 113, 0.1);
+  border: 1px solid rgba(79, 18, 113, 0.2);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.72rem;
+}
+
 .test-panel p {
   margin: 0 0 10px 0;
   color: var(--muted);
@@ -240,6 +302,10 @@ body {
   font-weight: 700;
   color: var(--muted);
   margin-bottom: 6px;
+}
+
+.test-panel label.center-label {
+  text-align: center;
 }
 
 .test-panel input {
@@ -314,7 +380,7 @@ body {
 .test-toggle {
   position: fixed;
   top: 96px;
-  right: 20px;
+  right: 332px;
   z-index: 21;
   border: 0;
   border-radius: 999px;
@@ -324,6 +390,10 @@ body {
   font-weight: 700;
   cursor: pointer;
   box-shadow: 0 12px 30px -12px rgba(79, 18, 113, 0.45);
+}
+
+.threshold-toggle {
+  right: 20px;
 }
 
 .node-card {
@@ -341,9 +411,10 @@ body {
 
 .node-card.alert {
   border: 5px solid #c72c74;
-  box-shadow:
-    0 20px 55px -16px rgba(199, 44, 116, 0.5),
-    0 0 0 7px rgba(199, 44, 116, 0.16);
+}
+
+.node-card.warn {
+  border: 3px solid #f2b84b;
 }
 
 .node-top {
@@ -386,6 +457,10 @@ body {
   color: var(--sweet-peony);
 }
 
+.node-subtitle.warn {
+  color: #f2b84b;
+}
+
 .node-orb-wrap {
   width: 36px;
   height: 36px;
@@ -401,6 +476,14 @@ body {
   font-weight: 800;
   color: var(--indigo);
   letter-spacing: -0.02em;
+}
+
+.node-power.warn {
+  color: #f2b84b;
+}
+
+.node-power.alert {
+  color: #c72c74;
 }
 
 .node-orb {
@@ -601,6 +684,10 @@ body {
   background: rgba(199, 44, 116, 0.12);
 }
 
+.load-triplet.warn .load-chip {
+  background: rgba(242, 184, 75, 0.2);
+}
+
 .memory-value {
   display: inline-flex;
   align-items: baseline;
@@ -668,6 +755,10 @@ body {
 
 .ring.alert {
   --ring-color: #c72c74;
+}
+
+.ring.warn {
+  --ring-color: #f2b84b;
 }
 
 .ring.alt {
@@ -774,8 +865,23 @@ body {
     right: 14px;
     bottom: 14px;
   }
+  .threshold-toggle {
+    right: 132px;
+  }
   .node-grid {
     grid-template-columns: 1fr;
+  }
+  .layout {
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+  .threshold-panel {
+    top: auto;
+    bottom: 14px;
+    right: 14px;
+    left: 14px;
+    width: auto;
+    max-height: 45vh;
   }
   .metric-stack {
     grid-template-columns: 1fr;

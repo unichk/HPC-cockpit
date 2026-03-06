@@ -8,15 +8,24 @@ function fmtNumber(value, digits = 1) {
   return value.toFixed(digits);
 }
 
-function ageClass(ageMs) {
-  if (ageMs < 15000) return "ok";
-  if (ageMs < 60000) return "warn";
+function ageClass(ageMs, thresholds) {
+  if (ageMs < thresholds.age_warn_ms) return "ok";
+  if (ageMs < thresholds.age_stale_ms) return "warn";
   return "down";
 }
 
 function formatTimestamp(ms) {
   if (typeof ms !== "number" || Number.isNaN(ms) || ms <= 0) return "--";
   return new Date(ms).toLocaleTimeString();
+}
+
+function formatAge(ms) {
+  if (typeof ms !== "number" || Number.isNaN(ms) || ms < 0) return "--";
+  const totalSeconds = Math.floor(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s ago`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s ago`;
 }
 
 function metricValue(metrics, moduleName, metricName) {
@@ -56,9 +65,166 @@ const METRIC_POINTS = [
   { id: "fan", label: "Fan" },
 ];
 
+const DEFAULT_THRESHOLDS = {
+  age_warn_ms: 15000,
+  age_stale_ms: 60000,
+  cpu_warn_pct: 80,
+  cpu_hot_pct: 95,
+  cpu_temp_warn_c: 80,
+  cpu_temp_crit_c: 90,
+  fan_ok_ratio_warn: 1.0,
+  node_power_warn_w: 600,
+  node_power_hot_w: 900,
+  total_power_warn_w: 2000,
+  total_power_hot_w: 3000,
+};
+
+const THRESHOLD_INPUT_IDS = {
+  age_warn_ms: "th-age-warn",
+  age_stale_ms: "th-age-stale",
+  cpu_warn_pct: "th-cpu-warn",
+  cpu_hot_pct: "th-cpu-hot",
+  cpu_temp_warn_c: "th-cpu-temp-warn",
+  cpu_temp_crit_c: "th-cpu-temp-crit",
+  fan_ok_ratio_warn: "th-fan-ok-ratio",
+  node_power_warn_w: "th-node-power-warn",
+  node_power_hot_w: "th-node-power-hot",
+  total_power_warn_w: "th-total-power-warn",
+  total_power_hot_w: "th-total-power-hot",
+};
+
+const THRESHOLD_STORAGE_KEY = "hpc_thresholds_v1";
+
 let selectedPointIds = new Set(METRIC_POINTS.map((point) => point.id));
 let pointSelectionCustomized = false;
 let testPanelEnabled = false;
+let thresholds = loadThresholds();
+
+function normalizeThresholds(raw) {
+  const merged = { ...DEFAULT_THRESHOLDS, ...(raw || {}) };
+  const toNumber = (value, fallback) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+  merged.age_warn_ms = Math.max(1000, Math.round(toNumber(merged.age_warn_ms, DEFAULT_THRESHOLDS.age_warn_ms)));
+  merged.age_stale_ms = Math.max(1000, Math.round(toNumber(merged.age_stale_ms, DEFAULT_THRESHOLDS.age_stale_ms)));
+  if (merged.age_stale_ms <= merged.age_warn_ms) {
+    merged.age_stale_ms = merged.age_warn_ms + 1000;
+  }
+  merged.cpu_warn_pct = clampPercent(toNumber(merged.cpu_warn_pct, DEFAULT_THRESHOLDS.cpu_warn_pct));
+  merged.cpu_hot_pct = clampPercent(toNumber(merged.cpu_hot_pct, DEFAULT_THRESHOLDS.cpu_hot_pct));
+  if (merged.cpu_hot_pct <= merged.cpu_warn_pct) {
+    merged.cpu_hot_pct = Math.min(100, merged.cpu_warn_pct + 1);
+  }
+  merged.cpu_temp_warn_c = toNumber(merged.cpu_temp_warn_c, DEFAULT_THRESHOLDS.cpu_temp_warn_c);
+  merged.cpu_temp_crit_c = toNumber(merged.cpu_temp_crit_c, DEFAULT_THRESHOLDS.cpu_temp_crit_c);
+  merged.fan_ok_ratio_warn = Math.max(0, Math.min(1, toNumber(merged.fan_ok_ratio_warn, DEFAULT_THRESHOLDS.fan_ok_ratio_warn)));
+  merged.node_power_warn_w = Math.max(1, toNumber(merged.node_power_warn_w, DEFAULT_THRESHOLDS.node_power_warn_w));
+  merged.node_power_hot_w = Math.max(1, toNumber(merged.node_power_hot_w, DEFAULT_THRESHOLDS.node_power_hot_w));
+  if (merged.node_power_hot_w <= merged.node_power_warn_w) {
+    merged.node_power_hot_w = merged.node_power_warn_w + 1;
+  }
+  merged.total_power_warn_w = Math.max(1, toNumber(merged.total_power_warn_w, DEFAULT_THRESHOLDS.total_power_warn_w));
+  merged.total_power_hot_w = Math.max(1, toNumber(merged.total_power_hot_w, DEFAULT_THRESHOLDS.total_power_hot_w));
+  if (merged.total_power_hot_w <= merged.total_power_warn_w) {
+    merged.total_power_hot_w = merged.total_power_warn_w + 1;
+  }
+  return merged;
+}
+
+function loadThresholds() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(THRESHOLD_STORAGE_KEY) || "{}");
+    return normalizeThresholds(parsed);
+  } catch (_) {
+    return { ...DEFAULT_THRESHOLDS };
+  }
+}
+
+function saveThresholds() {
+  localStorage.setItem(THRESHOLD_STORAGE_KEY, JSON.stringify(thresholds));
+}
+
+function renderThresholdPanelValues() {
+  for (const [key, elementId] of Object.entries(THRESHOLD_INPUT_IDS)) {
+    const element = document.getElementById(elementId);
+    if (!element) continue;
+    const value = thresholds[key];
+    if (key.endsWith("_ms")) {
+      element.value = String(Math.round(value / 1000));
+    } else if (key === "fan_ok_ratio_warn") {
+      element.value = value.toFixed(2);
+    } else {
+      element.value = String(Math.round(value));
+    }
+  }
+}
+
+function setupThresholdPanel() {
+  const panel = document.getElementById("threshold-panel");
+  const showButton = document.getElementById("show-threshold-panel");
+  const hideButton = document.getElementById("hide-threshold-panel");
+  const storageKey = "hpc_threshold_panel_hidden";
+
+  const setPanelHidden = (hidden) => {
+    panel.classList.toggle("hidden", hidden);
+    showButton.classList.toggle("hidden", !hidden);
+    localStorage.setItem(storageKey, hidden ? "1" : "0");
+  };
+
+  setPanelHidden(localStorage.getItem(storageKey) === "1");
+  showButton.addEventListener("click", () => setPanelHidden(false));
+  hideButton.addEventListener("click", () => setPanelHidden(true));
+
+  renderThresholdPanelValues();
+  refreshWarningCaseOptionLabels();
+  document.getElementById("threshold-apply").addEventListener("click", async () => {
+    const next = { ...thresholds };
+    for (const [key, elementId] of Object.entries(THRESHOLD_INPUT_IDS)) {
+      const element = document.getElementById(elementId);
+      if (!element) continue;
+      const parsed = Number(element.value);
+      if (!Number.isFinite(parsed)) continue;
+      if (key.endsWith("_ms")) {
+        next[key] = parsed * 1000;
+      } else {
+        next[key] = parsed;
+      }
+    }
+    thresholds = normalizeThresholds(next);
+    saveThresholds();
+    renderThresholdPanelValues();
+    refreshWarningCaseOptionLabels();
+    await refresh();
+  });
+  document.getElementById("threshold-reset").addEventListener("click", async () => {
+    thresholds = { ...DEFAULT_THRESHOLDS };
+    saveThresholds();
+    renderThresholdPanelValues();
+    refreshWarningCaseOptionLabels();
+    await refresh();
+  });
+}
+
+function refreshWarningCaseOptionLabels() {
+  const select = document.getElementById("warning-case");
+  if (!select) return;
+  const setLabel = (value, label) => {
+    const option = select.querySelector(`option[value="${value}"]`);
+    if (option) option.textContent = label;
+  };
+  setLabel("no_response_warn", `No response warn (${Math.round(thresholds.age_warn_ms / 1000)}s)`);
+  setLabel("no_response_stale", `No response stale (${Math.round(thresholds.age_stale_ms / 1000)}s)`);
+  setLabel("cpu_warn", `CPU warn (${Math.round(thresholds.cpu_warn_pct)}%)`);
+  setLabel("cpu_hot", `CPU hot (${Math.round(thresholds.cpu_hot_pct)}%)`);
+  setLabel("cpu_temp_warn", `CPU temp warn (${Math.round(thresholds.cpu_temp_warn_c)}°C)`);
+  setLabel("cpu_temp_crit", `CPU temp crit (${Math.round(thresholds.cpu_temp_crit_c)}°C)`);
+  setLabel("fan_ok_ratio_warn", `Fan OK ratio warn (${thresholds.fan_ok_ratio_warn.toFixed(2)})`);
+  setLabel("node_power_warn", `Node power warn (${Math.round(thresholds.node_power_warn_w)}W)`);
+  setLabel("node_power_hot", `Node power hot (${Math.round(thresholds.node_power_hot_w)}W)`);
+  setLabel("total_power_warn", `Total power warn (${Math.round(thresholds.total_power_warn_w)}W)`);
+  setLabel("total_power_hot", `Total power hot (${Math.round(thresholds.total_power_hot_w)}W)`);
+}
 
 async function fetchJson(path) {
   const response = await fetch(path);
@@ -127,22 +293,47 @@ function renderSummary(nodes, details) {
   const measuredPowerWatts = details
     .map((detail) => metricValue(detail.latest.metrics, "power", "watts"))
     .reduce((acc, value) => acc + value, 0);
-  const estimatedPowerWatts = nodes.length * (350 + avgCpu * 45);
-  const powerWatts = measuredPowerWatts > 0 ? measuredPowerWatts : estimatedPowerWatts;
+  const estimatedTotalPowerWatts = nodes.length * (350 + avgCpu * 45);
+  const totalPowerWatts = measuredPowerWatts > 0 ? measuredPowerWatts : estimatedTotalPowerWatts;
 
   let healthText = "Systems All Good";
   let healthColor = "var(--light-green)";
-  const staleCount = nodes.filter((node) => node.age_ms >= 60000).length;
-  const hotCount = cpuValues.filter((value) => value >= 95).length;
-  if (staleCount > 0 || hotCount > 0) {
+  const staleCount = nodes.filter((node) => node.age_ms >= thresholds.age_stale_ms).length;
+  const hotCount = cpuValues.filter((value) => value >= thresholds.cpu_hot_pct).length;
+  const hasAgeWarn = nodes.some((node) => node.age_ms >= thresholds.age_warn_ms);
+  const hasCpuWarn = cpuValues.some((value) => value >= thresholds.cpu_warn_pct);
+  const hasThermalCrit = details.some((detail) => {
+    const metrics = detail.latest.metrics;
+    const cpu = metricValueAny(metrics, "thermal", ["cpu_package_max_c", "cpu_package0_c"]);
+    return cpu >= thresholds.cpu_temp_crit_c;
+  });
+  const hasFanDegraded = details.some((detail) => {
+    const metrics = detail.latest.metrics;
+    const count = metricValue(metrics, "fan", "count");
+    const ok = metricValue(metrics, "fan", "ok_count");
+    if (count <= 0) return false;
+    return ok / count < thresholds.fan_ok_ratio_warn;
+  });
+  const hasNodePowerHot = details.some((detail) => metricValue(detail.latest.metrics, "power", "watts") >= thresholds.node_power_hot_w);
+  const hasNodePowerWarn = details.some((detail) => metricValue(detail.latest.metrics, "power", "watts") >= thresholds.node_power_warn_w);
+  const hasTotalPowerHot = totalPowerWatts >= thresholds.total_power_hot_w;
+  const hasTotalPowerWarn = totalPowerWatts >= thresholds.total_power_warn_w;
+
+  if (hotCount > 0 || hasThermalCrit || hasFanDegraded || hasNodePowerHot || hasTotalPowerHot) {
     healthText = "Alert Detected";
     healthColor = "var(--sweet-peony)";
-  } else if (nodes.some((node) => node.age_ms >= 15000) || cpuValues.some((value) => value >= 80)) {
+  } else if (staleCount > 0) {
+    healthText = "Worker Not Responding";
+    healthColor = "var(--sweet-peony)";
+  } else if (hasAgeWarn && !hasCpuWarn) {
+    healthText = "Worker Not Responding";
+    healthColor = "#f2b84b";
+  } else if (hasAgeWarn || hasCpuWarn || hasNodePowerWarn || hasTotalPowerWarn) {
     healthText = "Load Elevated";
     healthColor = "#f2b84b";
   }
 
-  document.getElementById("power-draw").textContent = fmtNumber(powerWatts, 0);
+  document.getElementById("power-draw").textContent = fmtNumber(totalPowerWatts, 0);
   document.getElementById("cluster-meta").textContent = healthText;
   document.getElementById("cluster-meta").style.color = healthColor;
   document.getElementById("brand-status-dot").style.background = healthColor;
@@ -150,12 +341,12 @@ function renderSummary(nodes, details) {
 
 function renderFooter(nodes) {
   const maxAge = nodes.length ? nodes.reduce((max, node) => Math.max(max, node.age_ms), 0) : 0;
-  const live = nodes.filter((node) => node.age_ms < 15000).length;
+  const live = nodes.filter((node) => node.age_ms < thresholds.age_warn_ms).length;
   document.getElementById("uptime-indicator").textContent = `Nodes live: ${live}/${nodes.length}`;
   document.getElementById("latency-indicator").textContent = `Data Age(max): ${fmtNumber(maxAge / 1000, 2)}s`;
 }
 
-function renderPointRow(pointId, metrics, alert) {
+function renderPointRow(pointId, metrics, issues) {
   const cpu = clampPercent(metricValue(metrics, "cpu", "usage"));
   const load1 = metricValueAny(metrics, "load", ["avg1", "1m"]);
   const load5 = metricValueAny(metrics, "load", ["avg5", "5m"]);
@@ -170,12 +361,13 @@ function renderPointRow(pointId, metrics, alert) {
   const fanAvailable = metricValue(metrics, "fan", "available") > 0;
 
   if (pointId === "cpu_usage") {
+    const cpuToneClass = issues.cpuHot ? "alert" : issues.cpuWarn ? "warn" : "";
     return `
       <div class="metric-row">
         <div class="metric-head">
           <span class="metric-label"><span class="metric-main">CPU</span></span>
           <span class="metric-right">
-            ${ringMarkup(cpu, `${fmtNumber(cpu, 0)}%`, `large${alert ? " alert" : ""}`)}
+            ${ringMarkup(cpu, `${fmtNumber(cpu, 0)}%`, `large${cpuToneClass ? ` ${cpuToneClass}` : ""}`)}
           </span>
         </div>
       </div>
@@ -183,11 +375,12 @@ function renderPointRow(pointId, metrics, alert) {
   }
 
   if (pointId === "load_avg_triplet") {
+    const loadToneClass = issues.stale || issues.cpuHot ? "alert" : issues.cpuWarn ? "warn" : "";
     return `
       <div class="metric-row">
         <div class="metric-head">
           <span class="metric-label"><span class="metric-main">Load</span></span>
-          <span class="load-triplet${alert ? " alert" : ""}">
+          <span class="load-triplet${loadToneClass ? ` ${loadToneClass}` : ""}">
             <span class="load-chip"><span>1m</span><strong>${fmtNumber(load1, 2)}</strong></span>
             <span class="load-chip"><span>5m</span><strong>${fmtNumber(load5, 2)}</strong></span>
             <span class="load-chip"><span>15m</span><strong>${fmtNumber(load15, 2)}</strong></span>
@@ -203,7 +396,7 @@ function renderPointRow(pointId, metrics, alert) {
         <div class="metric-head">
           <span class="metric-label"><span class="metric-main">Memory</span></span>
           <span class="metric-right">
-            ${ringMarkup(memPct, `${fmtNumber(kbToGiB(memUsedKb), 1)}G`, `${alert ? "alert" : "alt"} large`)}
+            ${ringMarkup(memPct, `${fmtNumber(kbToGiB(memUsedKb), 1)}G`, "alt large")}
           </span>
         </div>
       </div>
@@ -216,7 +409,7 @@ function renderPointRow(pointId, metrics, alert) {
         <div class="metric-head">
           <span class="metric-label"><span class="metric-main">Swap</span></span>
           <span class="metric-right">
-            ${ringMarkup(swapPct, `${fmtNumber(kbToGiB(swapUsedKb), 1)}G`, `${alert ? "alert" : "alt"} large`)}
+            ${ringMarkup(swapPct, `${fmtNumber(kbToGiB(swapUsedKb), 1)}G`, "alt large")}
           </span>
         </div>
       </div>
@@ -228,12 +421,8 @@ function renderPointRow(pointId, metrics, alert) {
     const nvmeMax = metricValue(metrics, "thermal", "nvme_max_c");
     const nicMax = metricValue(metrics, "thermal", "nic_max_c");
     const chipset = metricValue(metrics, "thermal", "chipset_c");
-    const cpuLevel = metricValue(metrics, "thermal", "cpu_alert_level");
-    const nvmeLevel = metricValue(metrics, "thermal", "nvme_alert_level");
-    const nicLevel = metricValue(metrics, "thermal", "nic_alert_level");
-    const chipsetLevel = metricValue(metrics, "thermal", "chipset_alert_level");
-    const hot = cpuLevel >= 2 || nvmeLevel >= 2 || nicLevel >= 2 || chipsetLevel >= 2;
-    const warm = !hot && (cpuLevel >= 1 || nvmeLevel >= 1 || nicLevel >= 1 || chipsetLevel >= 1);
+    const hot = cpuPkgMax >= thresholds.cpu_temp_crit_c;
+    const warm = !hot && cpuPkgMax >= thresholds.cpu_temp_warn_c;
     const tone = hot ? "crit" : warm ? "warn" : "";
 
     return `
@@ -261,7 +450,7 @@ function renderPointRow(pointId, metrics, alert) {
     const avgRpm = metricValue(metrics, "fan", "avg_rpm");
     const fanCount = metricValue(metrics, "fan", "count");
     const okCount = metricValue(metrics, "fan", "ok_count");
-    const fanAlert = fanAvailable && fanCount > 0 && okCount < fanCount;
+    const fanAlert = fanAvailable && fanCount > 0 && (okCount / fanCount) < thresholds.fan_ok_ratio_warn;
     const avgKrpm = avgRpm / 1000.0;
     const minKrpm = minRpm / 1000.0;
     const maxKrpm = maxRpm / 1000.0;
@@ -308,11 +497,30 @@ function renderCards(nodes, detailsById, selectedRows) {
     const cpu = clampPercent(metricValue(metrics, "cpu", "usage"));
     const powerWatts = metricValue(metrics, "power", "watts");
     const powerAvailable = metricValue(metrics, "power", "available") > 0;
-    const stale = node.age_ms >= 60000;
+    const nodePowerHot = powerAvailable && powerWatts >= thresholds.node_power_hot_w;
+    const nodePowerWarn = powerAvailable && !nodePowerHot && powerWatts >= thresholds.node_power_warn_w;
+    const cpuPkgMax = metricValueAny(metrics, "thermal", ["cpu_package_max_c", "cpu_package0_c"]);
+    const nvmeMax = metricValue(metrics, "thermal", "nvme_max_c");
+    const nicMax = metricValue(metrics, "thermal", "nic_max_c");
+    const chipset = metricValue(metrics, "thermal", "chipset_c");
+    const thermalCrit =
+      cpuPkgMax >= thresholds.cpu_temp_crit_c;
+    const thermalWarn = !thermalCrit && cpuPkgMax >= thresholds.cpu_temp_warn_c;
+    const fanCount = metricValue(metrics, "fan", "count");
+    const fanOkCount = metricValue(metrics, "fan", "ok_count");
+    const fanDegraded = fanCount > 0 && (fanOkCount / fanCount) < thresholds.fan_ok_ratio_warn;
+    const stale = node.age_ms >= thresholds.age_stale_ms;
+    const ageWarn = !stale && node.age_ms >= thresholds.age_warn_ms;
     const nodeTimestamp = formatTimestamp(detail.latest.timestamp_ms);
-    const subtitle = stale ? `Last data: ${nodeTimestamp} (stale)` : `Last data: ${nodeTimestamp}`;
-    const ageTone = ageClass(node.age_ms);
-    const alert = stale || cpu >= 95;
+    const subtitle = stale || ageWarn
+      ? `Worker not responding (last response: ${formatAge(node.age_ms)} at ${nodeTimestamp})`
+      : `Last data: ${nodeTimestamp}`;
+    const ageTone = ageClass(node.age_ms, thresholds);
+    const cpuHot = cpu >= thresholds.cpu_hot_pct;
+    const cpuWarn = !cpuHot && cpu >= thresholds.cpu_warn_pct;
+    const alert = stale || cpuHot || thermalCrit || fanDegraded || nodePowerHot;
+    const elevated = !alert && (ageWarn || cpuWarn || thermalWarn || nodePowerWarn);
+    const issues = { stale, ageWarn, cpuHot, cpuWarn };
 
     const topRowCandidates = ["cpu_usage", "memory_used_total", "swap_used_total"];
     const selectedIds = new Set(selectedRows.map((row) => row.id));
@@ -322,14 +530,14 @@ function renderCards(nodes, detailsById, selectedRows) {
     const topRowHtml =
       topRowIds.length > 0
         ? `<div class="metric-top-row cols-${topCols}">
-            ${topRowIds.map((id) => `<div class="metric-top-cell">${renderPointRow(id, metrics, alert)}</div>`).join("")}
+            ${topRowIds.map((id) => `<div class="metric-top-cell">${renderPointRow(id, metrics, issues)}</div>`).join("")}
           </div>`
         : "";
 
     const loadVisible = selectedIds.has("load_avg_triplet");
     const loadRowHtml = loadVisible
       ? `<div class="metric-mid-row">
-          <div class="metric-mid-cell">${renderPointRow("load_avg_triplet", metrics, alert)}</div>
+          <div class="metric-mid-cell">${renderPointRow("load_avg_triplet", metrics, issues)}</div>
         </div>`
       : "";
 
@@ -338,20 +546,20 @@ function renderCards(nodes, detailsById, selectedRows) {
     const bottomRowHtml =
       bottomRowIds.length > 0
         ? `<div class="metric-bottom-row cols-${bottomCols}">
-            ${bottomRowIds.map((id) => `<div class="metric-bottom-cell">${renderPointRow(id, metrics, alert)}</div>`).join("")}
+            ${bottomRowIds.map((id) => `<div class="metric-bottom-cell">${renderPointRow(id, metrics, issues)}</div>`).join("")}
           </div>`
         : "";
 
     const extraRowsHtml = selectedRows
       .filter((row) => !topRowCandidates.includes(row.id) && row.id !== "load_avg_triplet" && row.id !== "thermal" && row.id !== "fan")
-      .map((row) => renderPointRow(row.id, metrics, alert))
+      .map((row) => renderPointRow(row.id, metrics, issues))
       .join("");
 
     const anySectionVisible = topRowHtml || loadRowHtml || bottomRowHtml || extraRowsHtml;
     const metricsHtml = anySectionVisible ? `${loadRowHtml}${bottomRowHtml}${extraRowsHtml}` : "<div class=\"text-meta\">No metric selected</div>";
 
     const card = document.createElement("article");
-    card.className = `pebble-card node-card${alert ? " alert" : ""}`;
+    card.className = `pebble-card node-card${alert ? " alert" : elevated ? " warn" : ""}`;
     card.innerHTML = `
       <div class="node-top">
         <div>
@@ -362,7 +570,7 @@ function renderCards(nodes, detailsById, selectedRows) {
           <div class="node-subtitle${stale ? " alert" : ""}">${subtitle}</div>
         </div>
         <div class="node-top-right">
-          <div class="node-power">${powerAvailable ? `${fmtNumber(powerWatts, 0)}W` : "--"}</div>
+          <div class="node-power${nodePowerHot ? " alert" : nodePowerWarn ? " warn" : ""}">${powerAvailable ? `${fmtNumber(powerWatts, 0)}W` : "--"}</div>
           <div class="node-orb-wrap">
             <div class="node-orb ${stale ? "alert" : ageTone}"></div>
           </div>
@@ -421,6 +629,7 @@ async function setupTestPanel() {
     };
 
     setPanelHidden(localStorage.getItem(storageKey) === "1");
+    refreshWarningCaseOptionLabels();
     showButton.addEventListener("click", () => setPanelHidden(false));
     hideButton.addEventListener("click", () => setPanelHidden(true));
 
@@ -450,3 +659,5 @@ setupTestPanel().then(() => {
   refresh();
   setInterval(refresh, 1000);
 });
+
+setupThresholdPanel();

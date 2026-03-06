@@ -33,15 +33,53 @@
 
     <div class="layout">
       <main id="node-grid" class="node-grid"></main>
+      <aside id="threshold-panel" class="pebble-card threshold-panel">
+        <div class="threshold-panel-head">
+          <h2>Thresholds</h2>
+          <button id="hide-threshold-panel" class="panel-link panel-hide-btn" type="button">Hide</button>
+        </div>
+        <label for="th-age-warn">No response warn (s)</label>
+        <input id="th-age-warn" type="number" min="1" step="1" />
+        <label for="th-age-stale">No response stale (s)</label>
+        <input id="th-age-stale" type="number" min="1" step="1" />
+
+        <label for="th-cpu-warn">CPU warn (%)</label>
+        <input id="th-cpu-warn" type="number" min="1" max="100" step="1" />
+        <label for="th-cpu-hot">CPU hot (%)</label>
+        <input id="th-cpu-hot" type="number" min="1" max="100" step="1" />
+
+        <label for="th-cpu-temp-warn">CPU temp warn (°C)</label>
+        <input id="th-cpu-temp-warn" type="number" min="1" step="1" />
+        <label for="th-cpu-temp-crit">CPU temp crit (°C)</label>
+        <input id="th-cpu-temp-crit" type="number" min="1" step="1" />
+
+        <label for="th-fan-ok-ratio">Fan OK ratio warn</label>
+        <input id="th-fan-ok-ratio" type="number" min="0" max="1" step="0.01" />
+
+        <label for="th-node-power-warn">Node power warn (W)</label>
+        <input id="th-node-power-warn" type="number" min="1" step="1" />
+        <label for="th-node-power-hot">Node power hot (W)</label>
+        <input id="th-node-power-hot" type="number" min="1" step="1" />
+        <label for="th-total-power-warn">Total power warn (W)</label>
+        <input id="th-total-power-warn" type="number" min="1" step="1" />
+        <label for="th-total-power-hot">Total power hot (W)</label>
+        <input id="th-total-power-hot" type="number" min="1" step="1" />
+
+        <div class="threshold-actions">
+          <button id="threshold-apply" type="button">Apply</button>
+          <button id="threshold-reset" type="button">Reset</button>
+        </div>
+      </aside>
+      <button id="show-threshold-panel" class="test-toggle threshold-toggle hidden" type="button">Thresholds</button>
       <aside id="test-panel" class="pebble-card test-panel hidden">
         <div class="test-panel-head">
           <h2>Test Panel</h2>
-          <button id="hide-test-panel" class="panel-link" type="button">Hide</button>
+          <button id="hide-test-panel" class="panel-link panel-hide-btn" type="button">Hide</button>
         </div>
         <p>Inject fake nodes for layout testing.</p>
         <label for="fake-count">Fake node count</label>
         <input id="fake-count" type="number" min="0" max="200" value="0" />
-        <label for="metric-chooser">Metrics to show</label>
+        <label for="metric-chooser" class="center-label">Metrics to show</label>
         <div id="metric-chooser" class="metric-chooser"></div>
         <div class="metric-chooser-actions">
           <button id="metrics-all" class="panel-link" type="button">All</button>
@@ -51,13 +89,17 @@
         <label for="warning-case">Warning case</label>
         <select id="warning-case">
           <option value="reset">Reset</option>
-          <option value="load_elevated_cpu">Load Elevated (CPU)</option>
-          <option value="load_elevated_age">Load Elevated (Age)</option>
-          <option value="alert_cpu_hot">Alert (CPU Hot)</option>
-          <option value="alert_stale">Alert (Stale)</option>
-          <option value="thermal_warn">Thermal Warn</option>
-          <option value="thermal_crit">Thermal Critical</option>
-          <option value="fan_degraded">Fan Degraded</option>
+          <option value="no_response_warn">No response warn (s)</option>
+          <option value="no_response_stale">No response stale (s)</option>
+          <option value="cpu_warn">CPU warn (%)</option>
+          <option value="cpu_hot">CPU hot (%)</option>
+          <option value="cpu_temp_warn">CPU temp warn (°C)</option>
+          <option value="cpu_temp_crit">CPU temp crit (°C)</option>
+          <option value="fan_ok_ratio_warn">Fan OK ratio warn</option>
+          <option value="node_power_warn">Node power warn (W)</option>
+          <option value="node_power_hot">Node power hot (W)</option>
+          <option value="total_power_warn">Total power warn (W)</option>
+          <option value="total_power_hot">Total power hot (W)</option>
         </select>
         <button id="apply-warning-case" type="button">Trigger Warning</button>
       </aside>

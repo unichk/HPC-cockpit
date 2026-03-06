@@ -232,13 +232,17 @@ class StateStore:
         case = (case_name or "").strip().lower()
         valid_cases = {
             "reset",
-            "load_elevated_cpu",
-            "load_elevated_age",
-            "alert_cpu_hot",
-            "alert_stale",
-            "thermal_warn",
-            "thermal_crit",
-            "fan_degraded",
+            "no_response_warn",
+            "no_response_stale",
+            "cpu_warn",
+            "cpu_hot",
+            "cpu_temp_warn",
+            "cpu_temp_crit",
+            "fan_ok_ratio_warn",
+            "node_power_warn",
+            "node_power_hot",
+            "total_power_warn",
+            "total_power_hot",
         }
         if case not in valid_cases:
             return {"error": "unknown case"}
@@ -247,6 +251,9 @@ class StateStore:
             fake_count = len(self._fake_node_ids)
         if fake_count == 0:
             self.set_fake_nodes(1)
+            fake_count = 1
+        if case in {"total_power_warn", "total_power_hot"} and fake_count < 4:
+            self.set_fake_nodes(4)
 
         with self._lock:
             target_id = sorted(self._fake_node_ids)[0] if self._fake_node_ids else None
@@ -299,27 +306,45 @@ class StateStore:
                 if item is not None:
                     item["value"] = value
 
-            if case == "load_elevated_cpu":
+            if case == "cpu_warn":
                 set_metric("cpu", "usage", 85.0)
-            elif case == "load_elevated_age":
+            elif case == "cpu_hot":
+                set_metric("cpu", "usage", 97.0)
+            elif case == "no_response_warn":
                 target["received_at_ms"] = now - 20000
                 target["timestamp_ms"] = now - 20000
-            elif case == "alert_cpu_hot":
-                set_metric("cpu", "usage", 97.0)
-            elif case == "alert_stale":
+            elif case == "no_response_stale":
                 target["received_at_ms"] = now - 70000
                 target["timestamp_ms"] = now - 70000
-            elif case == "thermal_warn":
+            elif case == "cpu_temp_warn":
                 set_metric("thermal", "cpu_alert_level", 1.0)
                 set_metric("thermal", "cpu_package0_c", 82.0)
                 set_metric("thermal", "cpu_package_max_c", 82.0)
-            elif case == "thermal_crit":
+            elif case == "cpu_temp_crit":
                 set_metric("thermal", "cpu_alert_level", 2.0)
                 set_metric("thermal", "cpu_package0_c", 92.0)
                 set_metric("thermal", "cpu_package_max_c", 92.0)
-            elif case == "fan_degraded":
+            elif case == "fan_ok_ratio_warn":
                 set_metric("fan", "count", 12.0)
                 set_metric("fan", "ok_count", 9.0)
+            elif case == "node_power_warn":
+                set_metric("power", "watts", 700.0)
+                set_metric("power", "avg_watts", 700.0)
+                set_metric("power", "max_watts", 700.0)
+            elif case == "node_power_hot":
+                set_metric("power", "watts", 1000.0)
+                set_metric("power", "avg_watts", 1000.0)
+                set_metric("power", "max_watts", 1000.0)
+            elif case in {"total_power_warn", "total_power_hot"}:
+                target_watts = 700.0 if case == "total_power_warn" else 1000.0
+                for node_id in list(self._fake_node_ids):
+                    entry = self._nodes.get(node_id)
+                    if not entry:
+                        continue
+                    latest_metrics = entry["latest"].get("metrics", [])
+                    for metric in latest_metrics:
+                        if metric.get("module") == "power" and metric.get("name") in {"watts", "avg_watts", "max_watts"}:
+                            metric["value"] = target_watts
 
             self._nodes[target_id]["history"].append(dict(target))
             if len(self._nodes[target_id]["history"]) > self._history_size:
