@@ -99,6 +99,9 @@ let selectedPointIds = new Set(METRIC_POINTS.map((point) => point.id));
 let pointSelectionCustomized = false;
 let testPanelEnabled = false;
 let thresholds = loadThresholds();
+let lastAlarmLevel = 0;
+let audioContext = null;
+let alarmTimers = [];
 
 function normalizeThresholds(raw) {
   const merged = { ...DEFAULT_THRESHOLDS, ...(raw || {}) };
@@ -204,6 +207,69 @@ function setupThresholdPanel() {
     refreshWarningCaseOptionLabels();
     await refresh();
   });
+}
+
+function getAudioContext() {
+  if (audioContext) return audioContext;
+  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextCtor) return null;
+  audioContext = new AudioContextCtor();
+  return audioContext;
+}
+
+function playAlarmPattern(level) {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+  if (ctx.state === "suspended") {
+    ctx.resume().catch(() => {});
+  }
+  const now = ctx.currentTime;
+  const pulses = level === 2 ? 6 : 2;
+  const pulseGap = level === 2 ? 0.16 : 0.22;
+  for (let index = 0; index < pulses; index += 1) {
+    const start = now + index * pulseGap;
+    const end = start + 0.12;
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+    oscillator.type = "sawtooth";
+    oscillator.frequency.value = level === 2 ? (index % 2 === 0 ? 980 : 1480) : 1320;
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(level === 2 ? 0.17 : 0.13, start + 0.004);
+    gain.gain.exponentialRampToValueAtTime(0.0001, end);
+    oscillator.connect(gain);
+    gain.connect(ctx.destination);
+    oscillator.start(start);
+    oscillator.stop(end);
+  }
+}
+
+function clearAlarmSchedule() {
+  for (const timerId of alarmTimers) {
+    clearTimeout(timerId);
+  }
+  alarmTimers = [];
+}
+
+function scheduleAlarm(level) {
+  clearAlarmSchedule();
+  for (let index = 0; index < 3; index += 1) {
+    const timerId = setTimeout(() => {
+      playAlarmPattern(level);
+    }, index * 5000);
+    alarmTimers.push(timerId);
+  }
+}
+
+function maybeTriggerAlertSound(level) {
+  if (level === 0) {
+    clearAlarmSchedule();
+    lastAlarmLevel = 0;
+    return;
+  }
+  if (level !== lastAlarmLevel) {
+    scheduleAlarm(level);
+  }
+  lastAlarmLevel = level;
 }
 
 function refreshWarningCaseOptionLabels() {
@@ -351,6 +417,8 @@ function renderSummary(nodes, details) {
     healthText = warningIssues.join(" • ") || "Load Elevated";
     healthColor = "#f2b84b";
   }
+  const alertLevel = criticalIssues.length > 0 ? 2 : warningIssues.length > 0 || hasAgeWarn ? 1 : 0;
+  maybeTriggerAlertSound(alertLevel);
 
   document.getElementById("power-draw").textContent = fmtNumber(totalPowerWatts, 0);
   powerSummary.classList.remove("warn", "alert");
