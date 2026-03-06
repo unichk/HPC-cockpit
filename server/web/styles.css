@@ -63,10 +63,14 @@ body {
   justify-content: center;
   background: var(--indigo);
   color: white;
+  overflow: hidden;
 }
 
-.brand-icon .material-symbols-outlined {
-  font-size: 24px;
+.brand-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .brand-status {
@@ -347,11 +351,23 @@ body {
   font-weight: 700;
 }
 
+.node-title-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
 .node-subtitle {
   margin-top: 4px;
   color: var(--muted);
   font-weight: 700;
   font-size: 0.82rem;
+}
+
+.node-ip {
+  color: rgba(79, 18, 113, 0.55);
+  font-weight: 700;
+  font-size: 0.92rem;
 }
 
 .node-subtitle.alert {

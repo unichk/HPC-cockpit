@@ -239,7 +239,10 @@ function renderCards(nodes, detailsById, selectedRows) {
     card.innerHTML = `
       <div class="node-top">
         <div>
-          <div class="node-title">${node.node_id}</div>
+          <div class="node-title-wrap">
+            <div class="node-title">${node.node_id}</div>
+            <div class="node-ip">${node.remote_ip || "--"}</div>
+          </div>
           <div class="node-subtitle${stale ? " alert" : ""}">${subtitle}</div>
         </div>
         <div class="node-orb-wrap">
