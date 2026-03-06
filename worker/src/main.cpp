@@ -20,9 +20,10 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  auto transport = CreateTransport(config.transport);
+  std::string transport_error;
+  auto transport = CreateTransport(config, transport_error);
   if (!transport) {
-    std::cerr << "unknown transport: " << config.transport << "\n";
+    std::cerr << "transport_error " << transport_error << "\n";
     return 1;
   }
 

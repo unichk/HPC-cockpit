@@ -15,6 +15,7 @@ add_executable(hpc_worker
   src/collectors/memory_collector.cpp
   src/collectors/load_collector.cpp
   src/transports/stdout_transport.cpp
+  src/transports/udp_transport.cpp
 )
 
 target_include_directories(hpc_worker PRIVATE src)

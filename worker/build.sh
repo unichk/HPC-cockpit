@@ -26,6 +26,7 @@ g++ -std=c++17 -Wall -Wextra -Wpedantic \
   "${ROOT_DIR}/src/collectors/memory_collector.cpp" \
   "${ROOT_DIR}/src/collectors/load_collector.cpp" \
   "${ROOT_DIR}/src/transports/stdout_transport.cpp" \
+  "${ROOT_DIR}/src/transports/udp_transport.cpp" \
   -I"${ROOT_DIR}/src" \
   -o "${BIN_PATH}"
 

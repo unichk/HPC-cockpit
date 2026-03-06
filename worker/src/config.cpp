@@ -83,6 +83,15 @@ bool LoadConfig(const std::string& path, WorkerConfig& config, std::string& erro
       }
     } else if (key == "transport") {
       config.transport = value;
+    } else if (key == "transport_udp_host") {
+      config.transport_udp_host = value;
+    } else if (key == "transport_udp_port") {
+      try {
+        config.transport_udp_port = std::stoi(value);
+      } catch (...) {
+        error = "invalid transport_udp_port at line " + std::to_string(line_no);
+        return false;
+      }
     } else if (key == "modules") {
       config.modules = SplitCsv(value);
     } else {
@@ -97,6 +106,10 @@ bool LoadConfig(const std::string& path, WorkerConfig& config, std::string& erro
   }
   if (config.modules.empty()) {
     error = "modules cannot be empty";
+    return false;
+  }
+  if (config.transport_udp_port <= 0 || config.transport_udp_port > 65535) {
+    error = "transport_udp_port must be between 1 and 65535";
     return false;
   }
   if (config.node_id.empty()) {
