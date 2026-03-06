@@ -21,6 +21,7 @@ class StateStore:
         self._nodes = {}
         self._ingest_count = 0
         self._ingest_errors = 0
+        self._fake_node_ids = set()
 
     def ingest_snapshot(self, payload: bytes, remote_ip: str) -> None:
         try:
@@ -141,6 +142,53 @@ class StateStore:
             "metrics": metrics,
         }
 
+    def set_fake_nodes(self, count: int) -> dict:
+        if count < 0:
+            count = 0
+        if count > 200:
+            count = 200
+
+        with self._lock:
+            for node_id in self._fake_node_ids:
+                self._nodes.pop(node_id, None)
+            self._fake_node_ids.clear()
+
+            base_total_mem_kb = 755.3 * 1024 * 1024
+            base_swap_total_kb = 8.0 * 1024 * 1024
+            now = now_ms()
+
+            for index in range(1, count + 1):
+                node_id = f"fake-{index:02d}"
+                cpu = float((index * 17) % 100)
+                load1 = round(cpu / 100.0 * 1.8, 2)
+                load5 = round(load1 * 0.8, 2)
+                load15 = round(load1 * 0.6, 2)
+                mem_used_ratio = 0.1 + ((index * 11) % 70) / 100.0
+                mem_used_kb = base_total_mem_kb * mem_used_ratio
+                swap_used_kb = base_swap_total_kb * (((index * 7) % 50) / 100.0)
+                received_at = now - (index % 5) * 8000
+
+                snapshot = {
+                    "node_id": node_id,
+                    "timestamp_ms": received_at,
+                    "received_at_ms": received_at,
+                    "remote_ip": f"198.51.100.{index}",
+                    "metrics": [
+                        {"module": "cpu", "name": "usage", "value": cpu, "unit": "percent"},
+                        {"module": "load", "name": "avg1", "value": load1, "unit": "ratio"},
+                        {"module": "load", "name": "avg5", "value": load5, "unit": "ratio"},
+                        {"module": "load", "name": "avg15", "value": load15, "unit": "ratio"},
+                        {"module": "memory", "name": "used", "value": mem_used_kb, "unit": "kb"},
+                        {"module": "memory", "name": "total", "value": base_total_mem_kb, "unit": "kb"},
+                        {"module": "memory", "name": "swap_used", "value": swap_used_kb, "unit": "kb"},
+                        {"module": "memory", "name": "swap_total", "value": base_swap_total_kb, "unit": "kb"},
+                    ],
+                }
+                self._nodes[node_id] = {"latest": snapshot, "history": [snapshot]}
+                self._fake_node_ids.add(node_id)
+
+        return {"fake_nodes": count}
+
 
 class UdpHandler(socketserver.BaseRequestHandler):
     state: StateStore = None
@@ -153,12 +201,17 @@ class UdpHandler(socketserver.BaseRequestHandler):
 
 class ApiHandler(SimpleHTTPRequestHandler):
     state: StateStore = None
+    test_mode: bool = False
 
     def __init__(self, *args, **kwargs):
         web_dir = kwargs.pop("web_dir")
         super().__init__(*args, directory=web_dir, **kwargs)
 
     def do_GET(self) -> None:
+        if self.path == "/api/config":
+            self._json({"test_panel": self.test_mode})
+            return
+
         if self.path == "/api/health":
             self._json(self.state.health())
             return
@@ -183,6 +236,31 @@ class ApiHandler(SimpleHTTPRequestHandler):
         if self.path == "/":
             self.path = "/index.html"
         return super().do_GET()
+
+    def do_POST(self) -> None:
+        if self.path == "/api/test/fake-nodes":
+            if not self.test_mode:
+                self._json({"error": "test mode disabled"}, status=HTTPStatus.FORBIDDEN)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except Exception:
+                self._json({"error": "invalid json"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            count = payload.get("count", 0)
+            if not isinstance(count, int):
+                self._json({"error": "count must be integer"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            result = self.state.set_fake_nodes(count)
+            self._json(result)
+            return
+
+        self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
     def _json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         encoded = json.dumps(payload).encode("utf-8")
@@ -216,6 +294,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--http-host", default="0.0.0.0", help="HTTP bind host (default: 0.0.0.0)")
     parser.add_argument("--http-port", type=int, default=8080, help="HTTP bind port (default: 8080)")
     parser.add_argument("--history-size", type=int, default=120, help="Snapshots kept per node")
+    parser.add_argument("--test-panel", action="store_true", help="Enable test side panel in UI")
     return parser.parse_args()
 
 
@@ -234,6 +313,7 @@ def main() -> int:
     base_dir = os.path.dirname(os.path.abspath(__file__))
     web_dir = os.path.join(base_dir, "web")
     state = StateStore(history_size=args.history_size)
+    ApiHandler.test_mode = args.test_panel
 
     udp_server = start_udp_server(args.udp_host, args.udp_port, state)
     http_server = start_http_server(args.http_host, args.http_port, state, web_dir)

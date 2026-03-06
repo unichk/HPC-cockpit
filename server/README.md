@@ -22,7 +22,8 @@ Open UI:
 python3 server.py \
   --udp-host 0.0.0.0 --udp-port 9000 \
   --http-host 0.0.0.0 --http-port 8080 \
-  --history-size 120
+  --history-size 120 \
+  --test-panel
 ```
 
 ## Worker integration
@@ -43,3 +44,8 @@ Then restart worker.
 - `GET /api/nodes`
 - `GET /api/cluster`
 - `GET /api/node/<node_id>`
+- `GET /api/config`
+
+When `--test-panel` is enabled:
+- `POST /api/test/fake-nodes` with JSON body `{ "count": <int> }`
+- UI test panel includes multi-choice metric selection; all metrics are selected by default.

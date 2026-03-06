@@ -30,15 +30,33 @@
       </div>
     </header>
 
-    <main id="node-grid" class="node-grid"></main>
+    <div class="layout">
+      <main id="node-grid" class="node-grid"></main>
+      <aside id="test-panel" class="pebble-card test-panel hidden">
+        <div class="test-panel-head">
+          <h2>Test Panel</h2>
+          <button id="hide-test-panel" class="panel-link" type="button">Hide</button>
+        </div>
+        <p>Inject fake nodes for layout testing.</p>
+        <label for="fake-count">Fake node count</label>
+        <input id="fake-count" type="number" min="0" max="200" value="0" />
+        <label for="metric-chooser">Metrics to show</label>
+        <div id="metric-chooser" class="metric-chooser"></div>
+        <div class="metric-chooser-actions">
+          <button id="metrics-all" class="panel-link" type="button">All</button>
+          <button id="metrics-none" class="panel-link" type="button">None</button>
+        </div>
+        <button id="apply-fake-nodes" type="button">Apply</button>
+      </aside>
+      <button id="show-test-panel" class="test-toggle hidden" type="button">Test</button>
+    </div>
 
     <footer class="footer">
       <div class="footer-left">
         <span id="uptime-indicator">Uptime: --</span>
-        <span id="security-indicator">Ingest: --</span>
       </div>
       <div class="footer-right">
-        <span id="latency-indicator">Latency: --</span>
+        <span id="latency-indicator">Data Age(max): --</span>
         <span>HPC Cockpit</span>
       </div>
     </footer>
