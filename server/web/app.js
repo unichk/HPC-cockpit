@@ -659,6 +659,9 @@ function renderCards(nodes, detailsById, selectedRows) {
 
     const card = document.createElement("article");
     card.className = `pebble-card node-card${alert ? " alert" : elevated ? " warn" : ""}`;
+    card.setAttribute("role", "link");
+    card.setAttribute("tabindex", "0");
+    card.setAttribute("aria-label", `Open details for ${node.node_id}`);
     card.innerHTML = `
       <div class="node-top">
         <div>
@@ -678,6 +681,15 @@ function renderCards(nodes, detailsById, selectedRows) {
       ${topRowHtml}
       ${metricsHtml}
     `;
+    card.addEventListener("click", () => {
+      window.location.href = `/node.html?node=${encodeURIComponent(node.node_id)}`;
+    });
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        window.location.href = `/node.html?node=${encodeURIComponent(node.node_id)}`;
+      }
+    });
     grid.appendChild(card);
   }
 }

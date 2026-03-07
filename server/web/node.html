@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Node Details - HPC Cockpit</title>
+    <link rel="icon" type="image/jpeg" href="/assets/hpc-cockpit-icon.jpg" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&display=swap" />
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/node.css" />
+  </head>
+  <body>
+    <header class="pebble-card topbar node-topbar">
+      <div class="brand">
+        <div class="brand-icon">
+          <img src="/assets/hpc-cockpit-icon.jpg" alt="HPC Cockpit icon" />
+        </div>
+        <div>
+          <h1 id="node-title">Node</h1>
+          <div class="brand-status">
+            <span id="node-status-dot" class="status-dot"></span>
+            <span id="node-status-text">Loading...</span>
+          </div>
+        </div>
+      </div>
+      <a class="back-link" href="/">← Back to dashboard</a>
+    </header>
+
+    <main class="node-page">
+      <section class="pebble-card node-summary-card">
+        <div class="summary-grid">
+          <div><span class="modern-label">Hostname</span><p id="node-hostname">--</p></div>
+          <div><span class="modern-label">IP</span><p id="node-ip">--</p></div>
+          <div><span class="modern-label">Last Data</span><p id="node-last-time">--</p></div>
+          <div><span class="modern-label">Age</span><p id="node-age">--</p></div>
+          <div><span class="modern-label">Metrics</span><p id="node-metric-count">--</p></div>
+          <div class="summary-power"><span class="modern-label">Power</span><p id="node-power">--</p></div>
+        </div>
+      </section>
+
+      <section class="pebble-card node-visual-card">
+        <h2>Node Overview</h2>
+        <div id="node-visual"></div>
+      </section>
+
+      <section class="pebble-card node-metrics-card">
+        <div class="node-metrics-head">
+          <h2>Latest Metrics</h2>
+          <button id="metrics-toggle" class="panel-link panel-hide-btn" type="button">Open</button>
+        </div>
+        <div id="node-metrics" class="metrics-table-wrap"></div>
+      </section>
+    </main>
+
+    <aside id="test-panel" class="pebble-card test-panel hidden">
+      <div class="test-panel-head">
+        <h2>Test Panel</h2>
+        <button id="hide-test-panel" class="panel-link panel-hide-btn" type="button">Hide</button>
+      </div>
+      <p>Inject fake nodes / warnings.</p>
+      <label for="fake-count">Fake node count</label>
+      <input id="fake-count" type="number" min="0" max="200" value="0" />
+      <button id="apply-fake-nodes" type="button">Apply</button>
+      <label for="warning-case">Warning case</label>
+      <select id="warning-case">
+        <option value="reset">Reset</option>
+        <option value="no_response_warn">No response warn (s)</option>
+        <option value="no_response_stale">No response stale (s)</option>
+        <option value="cpu_warn">CPU warn (%)</option>
+        <option value="cpu_hot">CPU hot (%)</option>
+        <option value="cpu_temp_warn">CPU temp warn (°C)</option>
+        <option value="cpu_temp_crit">CPU temp crit (°C)</option>
+        <option value="fan_ok_ratio_warn">Fan OK ratio warn</option>
+        <option value="node_power_warn">Node power warn (W)</option>
+        <option value="node_power_hot">Node power hot (W)</option>
+        <option value="total_power_warn">Total power warn (W)</option>
+        <option value="total_power_hot">Total power hot (W)</option>
+      </select>
+      <button id="apply-warning-case" type="button">Trigger Warning</button>
+    </aside>
+    <button id="show-test-panel" class="test-toggle hidden" type="button">Test</button>
+
+    <script src="/node.js"></script>
+  </body>
+</html>

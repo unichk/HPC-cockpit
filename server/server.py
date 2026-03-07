@@ -15,8 +15,7 @@ def now_ms() -> int:
 
 
 class StateStore:
-    def __init__(self, history_size: int) -> None:
-        self._history_size = history_size
+    def __init__(self) -> None:
         self._lock = threading.Lock()
         self._nodes = {}
         self._ingest_count = 0
@@ -60,13 +59,10 @@ class StateStore:
             self._ingest_count += 1
             node_entry = self._nodes.get(node_id)
             if node_entry is None:
-                node_entry = {"latest": snapshot, "history": [snapshot]}
+                node_entry = {"latest": snapshot}
                 self._nodes[node_id] = node_entry
             else:
                 node_entry["latest"] = snapshot
-                node_entry["history"].append(snapshot)
-                if len(node_entry["history"]) > self._history_size:
-                    node_entry["history"] = node_entry["history"][-self._history_size :]
 
     def health(self) -> dict:
         with self._lock:
@@ -105,7 +101,6 @@ class StateStore:
             return {
                 "node_id": node_id,
                 "latest": node_entry["latest"],
-                "history": list(node_entry["history"]),
             }
 
     def cluster_latest(self) -> dict:
@@ -176,6 +171,23 @@ class StateStore:
                 fan_avg = (fan_min + fan_max) / 2.0
                 fan_count = 12.0
                 fan_ok = fan_count if index % 11 else fan_count - 1
+                fan_step = (fan_max - fan_min) / max(1.0, fan_count - 1.0)
+                fan_sensor_values = {
+                    "psu0_fan_rpm": fan_max,
+                    "psu1_fan_rpm": fan_max - fan_step,
+                    "sys_fan1_f_rpm": fan_min + fan_step * 2.0,
+                    "sys_fan1_r_rpm": fan_min + fan_step * 1.0,
+                    "sys_fan2_f_rpm": fan_min + fan_step * 9.0,
+                    "sys_fan2_r_rpm": fan_min + fan_step * 8.0,
+                    "sys_fan3_f_rpm": fan_min + fan_step * 8.5,
+                    "sys_fan3_r_rpm": fan_min + fan_step * 7.2,
+                    "sys_fan4_f_rpm": fan_min + fan_step * 3.0,
+                    "sys_fan4_r_rpm": fan_min + fan_step * 2.0,
+                    "sys_fan5_f_rpm": fan_min + fan_step * 3.2,
+                    "sys_fan5_r_rpm": fan_min + fan_step * 1.8,
+                    "sys_fan6_f_rpm": fan_min + fan_step * 2.4,
+                    "sys_fan6_r_rpm": fan_min + fan_step * 2.0,
+                }
                 received_at = now - (index % 5) * 8000
 
                 snapshot = {
@@ -221,9 +233,13 @@ class StateStore:
                         {"module": "fan", "name": "min_rpm", "value": fan_min, "unit": "rpm"},
                         {"module": "fan", "name": "max_rpm", "value": fan_max, "unit": "rpm"},
                         {"module": "fan", "name": "avg_rpm", "value": fan_avg, "unit": "rpm"},
+                        *[
+                            {"module": "fan", "name": name, "value": value, "unit": "rpm"}
+                            for name, value in fan_sensor_values.items()
+                        ],
                     ],
                 }
-                self._nodes[node_id] = {"latest": snapshot, "history": [snapshot]}
+                self._nodes[node_id] = {"latest": snapshot}
                 self._fake_node_ids.add(node_id)
 
         return {"fake_nodes": count}
@@ -254,6 +270,10 @@ class StateStore:
             fake_count = 1
         if case in {"total_power_warn", "total_power_hot"} and fake_count < 4:
             self.set_fake_nodes(4)
+            fake_count = 4
+        if case == "reset":
+            self.set_fake_nodes(fake_count)
+            return {"warning_case": case, "target_node": "all"}
 
         with self._lock:
             target_id = sorted(self._fake_node_ids)[0] if self._fake_node_ids else None
@@ -294,9 +314,6 @@ class StateStore:
                     metrics.append(metric)
                 latest["metrics"] = metrics
                 entry["latest"] = latest
-                entry["history"].append(latest)
-                if len(entry["history"]) > self._history_size:
-                    entry["history"] = entry["history"][-self._history_size :]
 
             target = self._nodes[target_id]["latest"]
             metrics_by_key = {(m.get("module"), m.get("name")): m for m in target.get("metrics", [])}
@@ -325,8 +342,32 @@ class StateStore:
                 set_metric("thermal", "cpu_package0_c", 92.0)
                 set_metric("thermal", "cpu_package_max_c", 92.0)
             elif case == "fan_ok_ratio_warn":
-                set_metric("fan", "count", 12.0)
-                set_metric("fan", "ok_count", 9.0)
+                expected_count = 14.0
+                missing = {"sys_fan6_r_rpm", "sys_fan6_f_rpm", "psu1_fan_rpm"}
+                kept_rpms = []
+                filtered_metrics = []
+                for metric in target.get("metrics", []):
+                    if metric.get("module") == "fan" and metric.get("name") in missing:
+                        continue
+                    if (
+                        metric.get("module") == "fan"
+                        and isinstance(metric.get("value"), (int, float))
+                        and str(metric.get("name", "")).endswith("_rpm")
+                        and metric.get("name") not in {"min_rpm", "max_rpm", "avg_rpm"}
+                    ):
+                        kept_rpms.append(float(metric["value"]))
+                    filtered_metrics.append(metric)
+                for missing_name in sorted(missing):
+                    filtered_metrics.append(
+                        {"module": "fan", "name": f"missing_{missing_name.replace('_rpm', '')}", "value": 1.0, "unit": "bool"}
+                    )
+                target["metrics"] = filtered_metrics
+                if kept_rpms:
+                    set_metric("fan", "min_rpm", min(kept_rpms))
+                    set_metric("fan", "max_rpm", max(kept_rpms))
+                    set_metric("fan", "avg_rpm", sum(kept_rpms) / len(kept_rpms))
+                set_metric("fan", "count", expected_count)
+                set_metric("fan", "ok_count", float(len(kept_rpms)))
             elif case == "node_power_warn":
                 set_metric("power", "watts", 700.0)
                 set_metric("power", "avg_watts", 700.0)
@@ -345,10 +386,6 @@ class StateStore:
                     for metric in latest_metrics:
                         if metric.get("module") == "power" and metric.get("name") in {"watts", "avg_watts", "max_watts"}:
                             metric["value"] = target_watts
-
-            self._nodes[target_id]["history"].append(dict(target))
-            if len(self._nodes[target_id]["history"]) > self._history_size:
-                self._nodes[target_id]["history"] = self._nodes[target_id]["history"][-self._history_size :]
 
         return {"warning_case": case, "target_node": target_id}
 
@@ -481,7 +518,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--udp-port", type=int, default=9000, help="UDP bind port (default: 9000)")
     parser.add_argument("--http-host", default="0.0.0.0", help="HTTP bind host (default: 0.0.0.0)")
     parser.add_argument("--http-port", type=int, default=8080, help="HTTP bind port (default: 8080)")
-    parser.add_argument("--history-size", type=int, default=120, help="Snapshots kept per node")
     parser.add_argument("--test-panel", action="store_true", help="Enable test side panel in UI")
     return parser.parse_args()
 
@@ -494,13 +530,9 @@ def main() -> int:
     if args.http_port <= 0 or args.http_port > 65535:
         print("error: http-port must be between 1 and 65535")
         return 2
-    if args.history_size <= 0:
-        print("error: history-size must be > 0")
-        return 2
-
     base_dir = os.path.dirname(os.path.abspath(__file__))
     web_dir = os.path.join(base_dir, "web")
-    state = StateStore(history_size=args.history_size)
+    state = StateStore()
     ApiHandler.test_mode = args.test_panel
 
     udp_server = start_udp_server(args.udp_host, args.udp_port, state)
