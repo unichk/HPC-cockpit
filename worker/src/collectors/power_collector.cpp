@@ -1,10 +1,8 @@
 #include "collector.h"
 
-#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdio>
-#include <numeric>
-#include <regex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -25,43 +23,71 @@ bool RunCommand(const char* command, std::string& output) {
   return status == 0 && !output.empty();
 }
 
+std::string Trim(const std::string& value) {
+  std::size_t start = 0;
+  while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start]))) {
+    ++start;
+  }
+  std::size_t end = value.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+    --end;
+  }
+  return value.substr(start, end - start);
+}
+
+std::vector<std::string> SplitPipe(const std::string& value) {
+  std::vector<std::string> parts;
+  std::stringstream stream(value);
+  std::string part;
+  while (std::getline(stream, part, '|')) {
+    parts.push_back(Trim(part));
+  }
+  return parts;
+}
+
 class PowerCollector : public Collector {
  public:
   std::string Name() const override { return "power"; }
 
   bool Collect(std::vector<Metric>& out, std::string& /*error*/) override {
     std::string payload;
-    if (!RunCommand("timeout 2s sensors 2>/dev/null", payload)) {
+    if (!RunCommand("ipmi-sensors --sensor-type=\"Power Supply\" 2>/dev/null", payload)) {
       out.push_back(Metric{"power", "available", 0.0, "bool"});
       return true;
     }
 
-    const std::regex watts_regex(R"(power[0-9]+:\s*([+-]?[0-9]+(?:\.[0-9]+)?)\s*W)");
+    // Expected line: "78 | PSU PIN TOTAL | Power Supply | 165.00 | W | 'OK'"
+    double watts = -1.0;
     std::istringstream stream(payload);
     std::string line;
-    std::vector<double> readings;
     while (std::getline(stream, line)) {
-      std::smatch match;
-      if (!std::regex_search(line, match, watts_regex)) {
+      const auto fields = SplitPipe(line);
+      if (fields.size() < 5) {
         continue;
       }
-      readings.push_back(std::stod(match[1].str()));
+      if (fields[1] != "PSU PIN TOTAL") {
+        continue;
+      }
+      if (fields[4] != "W") {
+        continue;
+      }
+      try {
+        watts = std::stod(fields[3]);
+        break;
+      } catch (...) {
+        continue;
+      }
     }
 
-    if (readings.empty()) {
+    if (watts < 0.0) {
       out.push_back(Metric{"power", "available", 0.0, "bool"});
       return true;
     }
 
-    const double sum = std::accumulate(readings.begin(), readings.end(), 0.0);
-    const double max = *std::max_element(readings.begin(), readings.end());
-    const double avg = sum / static_cast<double>(readings.size());
-
     out.push_back(Metric{"power", "available", 1.0, "bool"});
-    out.push_back(Metric{"power", "watts", sum, "watt"});
-    out.push_back(Metric{"power", "max_watts", max, "watt"});
-    out.push_back(Metric{"power", "avg_watts", avg, "watt"});
-    out.push_back(Metric{"power", "sensor_count", static_cast<double>(readings.size()), "count"});
+    out.push_back(Metric{"power", "watts", watts, "watt"});
+    out.push_back(Metric{"power", "avg_watts", watts, "watt"});
+    out.push_back(Metric{"power", "max_watts", watts, "watt"});
     return true;
   }
 };

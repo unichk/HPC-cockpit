@@ -143,7 +143,8 @@ class FanCollector : public Collector {
       const std::string sensor_name = SanitizeName(sensor_raw_name);
       out.push_back(Metric{"fan", sensor_name + "_rpm", rpm, "rpm"});
       rpms.push_back(rpm);
-      if (line.find("Nominal") != std::string::npos || line.find("OK") != std::string::npos ||
+      if (line.find("Nominal") != std::string::npos || line.find("Normal") != std::string::npos ||
+          line.find("Good") != std::string::npos || line.find("OK") != std::string::npos ||
           line.find("| ok |") != std::string::npos) {
         ++ok_count;
       }

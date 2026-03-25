@@ -99,8 +99,8 @@ class ThermalCollector : public Collector {
         continue;
       }
 
-      if ((section.find("mlx") != std::string::npos || section.find("nic") != std::string::npos ||
-           section.find("ethernet") != std::string::npos) &&
+      if ((StartsWith(section, "mlx") || StartsWith(section, "nic") ||
+           StartsWith(section, "ethernet") || section.find("-nic-") != std::string::npos) &&
           line.find(':') != std::string::npos) {
         std::smatch match;
         if (std::regex_search(line, match, temp_regex)) {
