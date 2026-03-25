@@ -73,10 +73,10 @@ const DEFAULT_THRESHOLDS = {
   cpu_temp_warn_c: 80,
   cpu_temp_crit_c: 90,
   fan_ok_ratio_warn: 1.0,
-  node_power_warn_w: 600,
-  node_power_hot_w: 900,
-  total_power_warn_w: 2000,
-  total_power_hot_w: 3000,
+  node_power_warn_w: 1700,
+  node_power_hot_w: 1900,
+  total_power_warn_w: 4500,
+  total_power_hot_w: 4800,
 };
 
 const THRESHOLD_INPUT_IDS = {
@@ -93,7 +93,7 @@ const THRESHOLD_INPUT_IDS = {
   total_power_hot_w: "th-total-power-hot",
 };
 
-const THRESHOLD_STORAGE_KEY = "hpc_thresholds_v1";
+const THRESHOLD_STORAGE_KEY = "hpc_thresholds_v2";
 
 let selectedPointIds = new Set(METRIC_POINTS.map((point) => point.id));
 let pointSelectionCustomized = false;

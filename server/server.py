@@ -369,15 +369,15 @@ class StateStore:
                 set_metric("fan", "count", expected_count)
                 set_metric("fan", "ok_count", float(len(kept_rpms)))
             elif case == "node_power_warn":
-                set_metric("power", "watts", 700.0)
-                set_metric("power", "avg_watts", 700.0)
-                set_metric("power", "max_watts", 700.0)
+                set_metric("power", "watts", 1800.0)
+                set_metric("power", "avg_watts", 1800.0)
+                set_metric("power", "max_watts", 1800.0)
             elif case == "node_power_hot":
-                set_metric("power", "watts", 1000.0)
-                set_metric("power", "avg_watts", 1000.0)
-                set_metric("power", "max_watts", 1000.0)
+                set_metric("power", "watts", 2000.0)
+                set_metric("power", "avg_watts", 2000.0)
+                set_metric("power", "max_watts", 2000.0)
             elif case in {"total_power_warn", "total_power_hot"}:
-                target_watts = 700.0 if case == "total_power_warn" else 1000.0
+                target_watts = 1150.0 if case == "total_power_warn" else 1250.0
                 for node_id in list(self._fake_node_ids):
                     entry = self._nodes.get(node_id)
                     if not entry:

@@ -8,7 +8,7 @@ let sortByNameAsc = true;
 let sortByModuleAsc = true;
 let sortField = "name";
 let latestMetrics = [];
-const THRESHOLD_STORAGE_KEY = "hpc_thresholds_v1";
+const THRESHOLD_STORAGE_KEY = "hpc_thresholds_v2";
 const NODE_DEFAULT_THRESHOLDS = {
   age_warn_ms: 15000,
   age_stale_ms: 60000,
@@ -17,8 +17,10 @@ const NODE_DEFAULT_THRESHOLDS = {
   cpu_temp_warn_c: 80,
   cpu_temp_crit_c: 90,
   fan_ok_ratio_warn: 1.0,
-  node_power_warn_w: 600,
-  node_power_hot_w: 900,
+  node_power_warn_w: 1700,
+  node_power_hot_w: 1900,
+  total_power_warn_w: 4500,
+  total_power_hot_w: 4800,
 };
 let thresholds = loadThresholds();
 
@@ -37,6 +39,14 @@ function normalizeThresholds(raw) {
   merged.fan_ok_ratio_warn = Math.max(0, Math.min(1, toNumber(merged.fan_ok_ratio_warn, NODE_DEFAULT_THRESHOLDS.fan_ok_ratio_warn)));
   merged.node_power_warn_w = Math.max(1, toNumber(merged.node_power_warn_w, NODE_DEFAULT_THRESHOLDS.node_power_warn_w));
   merged.node_power_hot_w = Math.max(1, toNumber(merged.node_power_hot_w, NODE_DEFAULT_THRESHOLDS.node_power_hot_w));
+  if (merged.node_power_hot_w <= merged.node_power_warn_w) {
+    merged.node_power_hot_w = merged.node_power_warn_w + 1;
+  }
+  merged.total_power_warn_w = Math.max(1, toNumber(merged.total_power_warn_w, NODE_DEFAULT_THRESHOLDS.total_power_warn_w));
+  merged.total_power_hot_w = Math.max(1, toNumber(merged.total_power_hot_w, NODE_DEFAULT_THRESHOLDS.total_power_hot_w));
+  if (merged.total_power_hot_w <= merged.total_power_warn_w) {
+    merged.total_power_hot_w = merged.total_power_warn_w + 1;
+  }
   return merged;
 }
 
