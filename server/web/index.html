@@ -4,119 +4,24 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>HPC Cockpit</title>
-    <link rel="icon" type="image/jpeg" href="/assets/hpc-cockpit-icon.png" />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&display=swap" />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="icon" type="image/png" href="assets/hpc-cockpit-icon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <header class="pebble-card topbar">
-      <div class="brand">
-        <div class="brand-icon">
-          <img src="/assets/hpc-cockpit-icon.png" alt="HPC Cockpit icon" />
-        </div>
-        <div>
-          <h1>HPC Cockpit</h1>
-          <div class="brand-status">
-            <span id="brand-status-dot" class="status-dot"></span>
-            <span id="cluster-meta">Loading cluster status...</span>
-          </div>
-        </div>
-      </div>
-      <div class="summary">
-        <div id="power-summary" class="summary-item power-only">
-          <span class="modern-label">Power Draw</span>
-          <span class="number-display"><span id="power-draw">0</span><span class="suffix">W</span></span>
-        </div>
-      </div>
-    </header>
+    <div id="root"></div>
 
-    <div class="layout">
-      <main id="node-grid" class="node-grid"></main>
-      <aside id="threshold-panel" class="pebble-card threshold-panel">
-        <div class="threshold-panel-head">
-          <h2>Thresholds</h2>
-          <button id="hide-threshold-panel" class="panel-link panel-hide-btn" type="button">Hide</button>
-        </div>
-        <label for="th-age-warn">No response warn (s)</label>
-        <input id="th-age-warn" type="number" min="1" step="1" />
-        <label for="th-age-stale">No response stale (s)</label>
-        <input id="th-age-stale" type="number" min="1" step="1" />
+    <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
 
-        <label for="th-cpu-warn">CPU warn (%)</label>
-        <input id="th-cpu-warn" type="number" min="1" max="100" step="1" />
-        <label for="th-cpu-hot">CPU hot (%)</label>
-        <input id="th-cpu-hot" type="number" min="1" max="100" step="1" />
-
-        <label for="th-cpu-temp-warn">CPU temp warn (°C)</label>
-        <input id="th-cpu-temp-warn" type="number" min="1" step="1" />
-        <label for="th-cpu-temp-crit">CPU temp crit (°C)</label>
-        <input id="th-cpu-temp-crit" type="number" min="1" step="1" />
-
-        <label for="th-fan-ok-ratio">Fan OK ratio warn</label>
-        <input id="th-fan-ok-ratio" type="number" min="0" max="1" step="0.01" />
-
-        <label for="th-node-power-warn">Node power warn (W)</label>
-        <input id="th-node-power-warn" type="number" min="1" step="1" />
-        <label for="th-node-power-hot">Node power hot (W)</label>
-        <input id="th-node-power-hot" type="number" min="1" step="1" />
-        <label for="th-total-power-warn">Total power warn (W)</label>
-        <input id="th-total-power-warn" type="number" min="1" step="1" />
-        <label for="th-total-power-hot">Total power hot (W)</label>
-        <input id="th-total-power-hot" type="number" min="1" step="1" />
-
-        <div class="threshold-actions">
-          <button id="threshold-apply" type="button">Apply</button>
-          <button id="threshold-reset" type="button">Reset</button>
-        </div>
-      </aside>
-      <button id="show-threshold-panel" class="test-toggle threshold-toggle hidden" type="button">Thresholds</button>
-      <aside id="test-panel" class="pebble-card test-panel hidden">
-        <div class="test-panel-head">
-          <h2>Test Panel</h2>
-          <button id="hide-test-panel" class="panel-link panel-hide-btn" type="button">Hide</button>
-        </div>
-        <p>Inject fake nodes for layout testing.</p>
-        <label for="fake-count">Fake node count</label>
-        <input id="fake-count" type="number" min="0" max="200" value="0" />
-        <label for="metric-chooser" class="center-label">Metrics to show</label>
-        <div id="metric-chooser" class="metric-chooser"></div>
-        <div class="metric-chooser-actions">
-          <button id="metrics-all" class="panel-link" type="button">All</button>
-          <button id="metrics-none" class="panel-link" type="button">None</button>
-        </div>
-        <button id="apply-fake-nodes" type="button">Apply</button>
-        <label for="warning-case">Warning case</label>
-        <select id="warning-case">
-          <option value="reset">Reset</option>
-          <option value="no_response_warn">No response warn (s)</option>
-          <option value="no_response_stale">No response stale (s)</option>
-          <option value="cpu_warn">CPU warn (%)</option>
-          <option value="cpu_hot">CPU hot (%)</option>
-          <option value="cpu_temp_warn">CPU temp warn (°C)</option>
-          <option value="cpu_temp_crit">CPU temp crit (°C)</option>
-          <option value="fan_ok_ratio_warn">Fan OK ratio warn</option>
-          <option value="node_power_warn">Node power warn (W)</option>
-          <option value="node_power_hot">Node power hot (W)</option>
-          <option value="total_power_warn">Total power warn (W)</option>
-          <option value="total_power_hot">Total power hot (W)</option>
-        </select>
-        <button id="apply-warning-case" type="button">Trigger Warning</button>
-      </aside>
-      <button id="show-test-panel" class="test-toggle hidden" type="button">Test</button>
-    </div>
-
-    <footer class="footer">
-      <div class="footer-left">
-        <span id="uptime-indicator">Uptime: --</span>
-      </div>
-      <div class="footer-right">
-        <span id="latency-indicator">Data Age(max): --</span>
-        <span>Created by Unicorn</span>
-        <span>HPC Cockpit</span>
-      </div>
-    </footer>
-
-    <script src="/app.js"></script>
+    <script src="live-data.js"></script>
+    <script type="text/babel" src="components.jsx"></script>
+    <script type="text/babel" src="NodeRow.jsx"></script>
+    <script type="text/babel" src="ScheduleGantt.jsx"></script>
+    <script type="text/babel" src="TweaksPanel.jsx"></script>
+    <script type="text/babel" src="app.jsx"></script>
   </body>
 </html>

@@ -1,3 +1,5 @@
 worker/build
 
 */__pycache__
+
+server/schedule.json

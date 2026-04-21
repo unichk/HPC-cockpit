@@ -3,83 +3,554 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Node Details - HPC Cockpit</title>
-    <link rel="icon" type="image/jpeg" href="/assets/hpc-cockpit-icon.png" />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&display=swap" />
-    <link rel="stylesheet" href="/styles.css" />
-    <link rel="stylesheet" href="/node.css" />
+    <title>Node Detail — HPC Cockpit</title>
+    <link rel="icon" type="image/png" href="assets/hpc-cockpit-icon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" />
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+      .nd-layout { display: grid; grid-template-rows: auto 1fr auto; min-height: 100vh; padding: 8px 10px 6px; gap: 8px; }
+      .nd-topbar { display: flex; align-items: center; gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 8px 14px; box-shadow: var(--shadow-sm); }
+      .nd-back { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--accent); text-decoration: none; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--accent-soft); transition: all 150ms; flex-shrink: 0; }
+      .nd-back:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+      .nd-node-name { font-size: 18px; font-weight: 800; font-family: var(--mono); letter-spacing: -0.02em; color: var(--ink); }
+      .nd-node-ip { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+      .nd-spacer { flex: 1; }
+      .nd-clock { font-size: 12px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+      .nd-summary { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }
+      .nd-kpi { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; box-shadow: var(--shadow-sm); }
+      .nd-kpi.warn { border-color: color-mix(in oklab, var(--warn) 40%, var(--line)); background: color-mix(in oklab, var(--warn) 6%, var(--surface)); }
+      .nd-kpi.crit { border-color: color-mix(in oklab, var(--crit) 40%, var(--line)); background: color-mix(in oklab, var(--crit) 6%, var(--surface)); }
+      .nd-kpi-label { font-size: 8.5px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; color: var(--muted); }
+      .nd-kpi-val { font-size: 24px; font-weight: 800; color: var(--ink); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; line-height: 1; display: flex; align-items: baseline; gap: 2px; }
+      .nd-kpi-val .u { font-size: 12px; font-weight: 600; color: var(--muted); }
+      .nd-kpi.warn .nd-kpi-val { color: var(--warn); }
+      .nd-kpi.crit .nd-kpi-val { color: var(--crit); }
+      .nd-kpi-sub { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; font-weight: 500; }
+      .nd-kpi-bar { height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; }
+      .nd-kpi-bar-fill { height: 100%; border-radius: 999px; transition: width 400ms ease; }
+      .nd-kpi.power-kpi .nd-kpi-val { font-size: 28px; }
+
+      .nd-load-chips { display: flex; gap: 4px; }
+      .nd-load-chip { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 4px 4px; border-radius: 6px; background: var(--accent-soft); font-size: 11px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+      .nd-load-chip span { font-size: 7.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+
+      .nd-body { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto auto; gap: 10px; }
+
+      .nd-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 16px; box-shadow: var(--shadow-sm); }
+      .nd-card.full { grid-column: 1 / -1; }
+      .nd-card h3 { margin: 0 0 14px; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+      .nd-card h3::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+      .nd-bar-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+      .nd-bar-item { display: flex; flex-direction: column; gap: 6px; }
+      .nd-bar-header { display: flex; justify-content: space-between; align-items: baseline; }
+      .nd-bar-label { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+      .nd-bar-value { font-size: 15px; font-weight: 800; color: var(--ink); font-variant-numeric: tabular-nums; }
+      .nd-bar-value .u { font-size: 9px; font-weight: 600; color: var(--muted); }
+      .nd-bar-value.warn { color: var(--warn); }
+      .nd-bar-value.crit { color: var(--crit); }
+      .nd-bar-track { height: 10px; border-radius: 999px; background: var(--line); overflow: hidden; position: relative; }
+      .nd-bar-fill { position: absolute; inset: 0 auto 0 0; border-radius: 999px; transition: width 400ms ease; }
+
+      .nd-chart { width: 100%; overflow: hidden; }
+      .nd-chart svg { display: block; width: 100%; }
+
+      .nd-fan-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px; }
+      .nd-fan-chip { padding: 6px 4px; border-radius: 7px; display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 10px; font-weight: 700; border: 1px solid var(--line); }
+      .nd-fan-chip.ok { background: color-mix(in oklab, var(--ok) 12%, var(--surface-2)); color: var(--ok); border-color: color-mix(in oklab, var(--ok) 25%, var(--line)); }
+      .nd-fan-chip.fail { background: color-mix(in oklab, var(--crit) 12%, var(--surface-2)); color: var(--crit); border-color: color-mix(in oklab, var(--crit) 25%, var(--line)); }
+      .nd-fan-label { font-size: 8px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; opacity: 0.7; }
+
+      .nd-metrics-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      .nd-metrics-table th { font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 700; padding: 6px 10px; text-align: left; border-bottom: 2px solid var(--line); }
+      .nd-metrics-table td { padding: 6px 10px; border-bottom: 1px solid var(--line-2); font-variant-numeric: tabular-nums; vertical-align: middle; }
+      .nd-metrics-table tr:last-child td { border-bottom: none; }
+      .nd-metrics-table tr:hover td { background: var(--accent-soft); }
+      .nd-module-badge { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 10px; font-weight: 700; }
+      .nd-metric-name { font-weight: 600; color: var(--ink); }
+      .nd-metric-val { font-weight: 800; color: var(--ink); }
+      .nd-metric-unit { color: var(--muted); font-size: 10px; font-weight: 500; }
+
+      .nd-footer { font-size: 10.5px; color: var(--muted); padding: 2px 6px; display: flex; justify-content: space-between; }
+      .nd-footer strong { color: var(--ink); font-weight: 700; }
+      .nd-footer .dot-sep { margin: 0 5px; opacity: 0.4; }
+
+      @media (max-width: 900px) {
+        .nd-summary { grid-template-columns: repeat(4, 1fr); }
+        .nd-body { grid-template-columns: 1fr; }
+        .nd-fan-grid { grid-template-columns: repeat(4, 1fr); }
+      }
+    </style>
   </head>
   <body>
-    <header class="pebble-card topbar node-topbar">
-      <div class="brand">
-        <div class="brand-icon">
-          <img src="/assets/hpc-cockpit-icon.png" alt="HPC Cockpit icon" />
-        </div>
-        <div>
-          <h1 id="node-title">Node</h1>
-          <div class="brand-status">
-            <span id="node-status-dot" class="status-dot"></span>
-            <span id="node-status-text">Loading...</span>
+    <div id="root"></div>
+    <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+    <script src="live-data.js"></script>
+    <script type="text/babel">
+      const { useState, useEffect, useMemo } = React;
+      const THR = window.DEFAULT_THRESHOLDS;
+      const tone = (v, warn, crit) => v >= crit ? "crit" : v >= warn ? "warn" : "";
+
+      function useClock() {
+        const [now, setNow] = useState(new Date());
+        useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
+        return now;
+      }
+
+      function MiniChart({ values, color = "var(--accent)", height = 56 }) {
+        if (!values || values.length < 2) return null;
+        const W = 600, H = height * 3;
+        const mn = Math.min(...values), mx = Math.max(...values);
+        const rng = Math.max(1, mx - mn);
+        const pad = 6;
+        const pts = values.map((v, i) => {
+          const x = pad + (i / (values.length - 1)) * (W - pad * 2);
+          const y = H - pad - ((v - mn) / rng) * (H - pad * 2);
+          return [x, y];
+        });
+        const line = pts.map((p, i) => (i === 0 ? `M${p[0]},${p[1]}` : `L${p[0]},${p[1]}`)).join(" ");
+        const area = `${line} L${pts[pts.length-1][0]},${H} L${pts[0][0]},${H} Z`;
+        const gradId = `g${Math.abs(color.split("").reduce((a,c)=>a+c.charCodeAt(0),0))}`;
+        return (
+          <div className="nd-chart">
+            <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ height }}>
+              <defs>
+                <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={color} stopOpacity="0.25" />
+                  <stop offset="100%" stopColor={color} stopOpacity="0.02" />
+                </linearGradient>
+              </defs>
+              <path d={area} fill={`url(#${gradId})`} />
+              <path d={line} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+              <circle cx={pts[pts.length-1][0]} cy={pts[pts.length-1][1]} r="4" fill={color} />
+            </svg>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:9, color:"var(--muted)", marginTop:2, fontVariantNumeric:"tabular-nums" }}>
+              <span>{mn.toFixed(0)}</span><span>{mx.toFixed(0)}</span>
+            </div>
           </div>
-        </div>
-      </div>
-      <a class="back-link" href="/">← Back to dashboard</a>
-    </header>
+        );
+      }
 
-    <main class="node-page">
-      <section class="pebble-card node-summary-card">
-        <div class="summary-grid">
-          <div><span class="modern-label">Hostname</span><p id="node-hostname">--</p></div>
-          <div><span class="modern-label">IP</span><p id="node-ip">--</p></div>
-          <div><span class="modern-label">Last Data</span><p id="node-last-time">--</p></div>
-          <div><span class="modern-label">Age</span><p id="node-age">--</p></div>
-          <div><span class="modern-label">Metrics</span><p id="node-metric-count">--</p></div>
-          <div class="summary-power"><span class="modern-label">Power</span><p id="node-power">--</p></div>
-        </div>
-      </section>
+      function formatMetricValue(value, name, unit) {
+        if (typeof value !== "number") return String(value);
+        if (unit === "kb") return (value / 1024).toFixed(1);
+        if (unit === "percent" || name.endsWith("_pct")) return value.toFixed(1);
+        if (unit === "bool" || unit === "level" || unit === "count") return value.toFixed(0);
+        if (unit === "rpm" || unit === "watt") return value.toFixed(0);
+        if (unit === "celsius") return value.toFixed(1);
+        return value.toFixed(3).replace(/\.?0+$/, "");
+      }
 
-      <section class="pebble-card node-visual-card">
-        <h2>Node Overview</h2>
-        <div id="node-visual"></div>
-      </section>
+      function displayUnit(unit) {
+        switch (unit) {
+          case "kb": return "MiB";
+          case "percent": return "%";
+          case "celsius": return "°C";
+          case "watt": return "W";
+          case "rpm": return "RPM";
+          case "bool": return "";
+          case "level": return "";
+          case "count": return "";
+          case "ratio": return "";
+          default: return unit || "";
+        }
+      }
 
-      <section class="pebble-card node-metrics-card">
-        <div class="node-metrics-head">
-          <h2>Latest Metrics</h2>
-          <button id="metrics-toggle" class="panel-link panel-hide-btn" type="button">Open</button>
-        </div>
-        <div id="node-metrics" class="metrics-table-wrap"></div>
-      </section>
-    </main>
+      function readSettings() {
+        try { return JSON.parse(localStorage.getItem("cockpit_settings_v1")) || {}; } catch { return {}; }
+      }
+      function writeSettings(patch) {
+        const current = readSettings();
+        const next = { ...current, ...patch };
+        try { localStorage.setItem("cockpit_settings_v1", JSON.stringify(next)); } catch {}
+        return next;
+      }
+      function readThemeFromSettings() {
+        return readSettings().theme || "light";
+      }
+      function readThresholdsFromSettings() {
+        const s = readSettings();
+        if (s && s.alerts) return { ...THR, ...s.alerts };
+        return THR;
+      }
 
-    <aside id="test-panel" class="pebble-card test-panel hidden">
-      <div class="test-panel-head">
-        <h2>Test Panel</h2>
-        <button id="hide-test-panel" class="panel-link panel-hide-btn" type="button">Hide</button>
-      </div>
-      <p>Inject fake nodes / warnings.</p>
-      <label for="fake-count">Fake node count</label>
-      <input id="fake-count" type="number" min="0" max="200" value="0" />
-      <button id="apply-fake-nodes" type="button">Apply</button>
-      <label for="warning-case">Warning case</label>
-      <select id="warning-case">
-        <option value="reset">Reset</option>
-        <option value="no_response_warn">No response warn (s)</option>
-        <option value="no_response_stale">No response stale (s)</option>
-        <option value="cpu_warn">CPU warn (%)</option>
-        <option value="cpu_hot">CPU hot (%)</option>
-        <option value="cpu_temp_warn">CPU temp warn (°C)</option>
-        <option value="cpu_temp_crit">CPU temp crit (°C)</option>
-        <option value="fan_ok_ratio_warn">Fan OK ratio warn</option>
-        <option value="node_power_warn">Node power warn (W)</option>
-        <option value="node_power_hot">Node power hot (W)</option>
-        <option value="total_power_warn">Total power warn (W)</option>
-        <option value="total_power_hot">Total power hot (W)</option>
-      </select>
-      <button id="apply-warning-case" type="button">Trigger Warning</button>
-    </aside>
-    <button id="show-test-panel" class="test-toggle hidden" type="button">Test</button>
+      function NodeDetailPage() {
+        const params = new URLSearchParams(window.location.search);
+        const nodeId = params.get("node") || "";
+        const [theme, setTheme] = useState(readThemeFromSettings);
+        const [node, setNode] = useState(null);
+        const [sortAsc, setSortAsc] = useState(true);
+        const [notFound, setNotFound] = useState(false);
+        const now = useClock();
+        const thr = useMemo(readThresholdsFromSettings, []);
 
-    <script src="/node.js"></script>
+        useEffect(() => {
+          document.documentElement.dataset.theme = theme;
+          writeSettings({ theme });
+        }, [theme]);
+
+        useEffect(() => {
+          if (!nodeId) { setNotFound(true); return; }
+          return window.startLiveNodeDetail(nodeId, (n) => {
+            if (n) setNode(n); else setNotFound(true);
+          });
+        }, [nodeId]);
+
+        if (!nodeId || (notFound && !node)) {
+          return (
+            <div style={{ padding: 40, color: "var(--muted)", fontFamily: "var(--font)" }}>
+              Node <strong>{nodeId || "(none)"}</strong> not found.
+              {" "}<a href="index.html" style={{ color: "var(--accent)" }}>← Back</a>
+            </div>
+          );
+        }
+        if (!node) {
+          return <div style={{ padding: 40, color: "var(--muted)", fontFamily: "var(--font)" }}>Loading {nodeId}…</div>;
+        }
+
+        const cpuTone  = tone(node.cpu,   thr.cpuWarn,       thr.cpuHot);
+        const memTone  = tone(node.memPct, 75,               90);
+        const swapTone = tone(node.swapPct, 20,              50);
+        const tempTone = tone(node.temp,  thr.tempWarn,      thr.tempCrit);
+        const powTone  = tone(node.power, thr.nodePowerWarn, thr.nodePowerHot);
+        const fanRatio = node.fanTotal > 0 ? node.fanOk / node.fanTotal : 1;
+        const fanTone  = fanRatio < 0.75 ? "crit" : fanRatio < 1 ? "warn" : "";
+        const isOffline = node.age >= thr.ageStale;
+        const colorFor = t => t === "crit" ? "var(--crit)" : t === "warn" ? "var(--warn)" : "var(--ok)";
+
+        const rawRows = node.rawMetrics.map(r => ({
+          module: r.module || "",
+          name: r.name || "",
+          value: r.value,
+          unit: r.unit || "",
+        }));
+        const sortedMetrics = [...rawRows].sort((a, b) => sortAsc
+          ? a.module.localeCompare(b.module) || a.name.localeCompare(b.name)
+          : b.module.localeCompare(a.module) || b.name.localeCompare(a.name));
+
+        const tsText = node.timestampMs ? new Date(node.timestampMs).toLocaleTimeString("en-US",{hour12:false}) : "—";
+
+        const controlActions = [
+          {label:"Reboot Node",     icon:"↺", color:"var(--warn)",   desc:"Graceful OS restart"},
+          {label:"Power Off",       icon:"⏻", color:"var(--crit)",   desc:"Hard power down"},
+          {label:"Reset BMC",       icon:"⟳", color:"var(--accent)", desc:"Restart baseboard controller"},
+          {label:"Clear Job Queue", icon:"✕", color:"var(--muted)",  desc:"Cancel all pending jobs"},
+          {label:"Run Diagnostics", icon:"⚙", color:"var(--ok)",     desc:"Self-test & health check"},
+          {label:"Export Logs",     icon:"↓", color:"var(--accent)", desc:"Download last 24h logs"},
+          {label:"Set Maintenance", icon:"🔧", color:"var(--warn)",  desc:"Mark node as under maintenance"},
+          {label:"Wake on LAN",     icon:"⚡", color:"var(--ok)",    desc:"Send magic packet"},
+        ];
+
+        return (
+          <div className="nd-layout">
+            <header className="nd-topbar">
+              <a href="index.html" className="nd-back">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+                Back
+              </a>
+              <span className={`status-dot ${isOffline ? "crit" : cpuTone}`} />
+              <span className="nd-node-name">{node.id}</span>
+              <span className="nd-node-ip">{node.ip}</span>
+              <span className={`node-age ${isOffline ? "crit" : ""}`}>
+                <span className="node-age-dot" />
+                {isOffline ? `offline · ${Math.floor(node.age)}s ago` : `live · ${node.age.toFixed(1)}s`}
+              </span>
+              <div className="nd-spacer" />
+              <span className="nd-clock">{now.toLocaleTimeString("en-US", { hour12: false })}</span>
+              <button className="icon-btn" onClick={() => setTheme(t => t === "dark" ? "light" : "dark")} title="Toggle theme">
+                {theme === "dark"
+                  ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2"/></svg>
+                  : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                }
+              </button>
+            </header>
+
+            <div className="nd-summary">
+              <div className={`nd-kpi ${cpuTone}`}>
+                <div className="nd-kpi-label">CPU Usage</div>
+                <div className="nd-kpi-val">{Math.round(node.cpu)}<span className="u">%</span></div>
+                <div className="nd-kpi-bar"><div className="nd-kpi-bar-fill" style={{ width: `${node.cpu}%`, background: colorFor(cpuTone) }} /></div>
+                <div className="nd-kpi-sub">Warn {thr.cpuWarn}% · Crit {thr.cpuHot}%</div>
+              </div>
+              <div className={`nd-kpi ${memTone}`}>
+                <div className="nd-kpi-label">Memory</div>
+                <div className="nd-kpi-val">{node.memG.toFixed(1)}<span className="u">/{node.memTotal}G</span></div>
+                <div className="nd-kpi-bar"><div className="nd-kpi-bar-fill" style={{ width: `${Math.min(100, node.memPct)}%`, background: "var(--mem)" }} /></div>
+                <div className="nd-kpi-sub">{node.memPct.toFixed(0)}% used · {(node.memTotal - node.memG).toFixed(1)}G free</div>
+              </div>
+              <div className={`nd-kpi ${swapTone}`}>
+                <div className="nd-kpi-label">Swap</div>
+                <div className="nd-kpi-val">{node.swapG.toFixed(1)}<span className="u">/{node.swapTotal}G</span></div>
+                <div className="nd-kpi-bar"><div className="nd-kpi-bar-fill" style={{ width: `${Math.min(100, node.swapPct)}%`, background: "var(--swap)" }} /></div>
+                <div className="nd-kpi-sub">{node.swapPct.toFixed(0)}% used</div>
+              </div>
+              <div className="nd-kpi">
+                <div className="nd-kpi-label">Load Average</div>
+                <div className="nd-load-chips">
+                  {["1m","5m","15m"].map((l,i) => (
+                    <div className="nd-load-chip" key={l}><span>{l}</span>{node.load[i].toFixed(2)}</div>
+                  ))}
+                </div>
+                <div className="nd-kpi-sub">From /proc/loadavg</div>
+              </div>
+              <div className={`nd-kpi ${tempTone}`}>
+                <div className="nd-kpi-label">CPU Temp</div>
+                <div className="nd-kpi-val">{Math.round(node.temp)}<span className="u">°C</span></div>
+                <div className="nd-kpi-bar"><div className="nd-kpi-bar-fill" style={{ width: `${Math.min(100, node.temp)}%`, background: colorFor(tempTone) }} /></div>
+                <div className="nd-kpi-sub">Warn {thr.tempWarn}° · Crit {thr.tempCrit}°</div>
+              </div>
+              <div className={`nd-kpi ${fanTone}`}>
+                <div className="nd-kpi-label">Fans</div>
+                <div className="nd-kpi-val">{node.fanOk}<span className="u">/{node.fanTotal} OK</span></div>
+                <div className="nd-kpi-sub">{(node.fanRpm/1000).toFixed(1)} kRPM avg</div>
+              </div>
+              <div className={`nd-kpi power-kpi ${powTone}`}>
+                <div className="nd-kpi-label">Node Power</div>
+                <div className="nd-kpi-val">{Math.round(node.power)}<span className="u">W</span></div>
+                <div className="nd-kpi-bar"><div className="nd-kpi-bar-fill" style={{ width:`${Math.min(100,(node.power/thr.nodePowerHot)*100)}%`, background: colorFor(powTone) }} /></div>
+                <div className="nd-kpi-sub">Warn {thr.nodePowerWarn}W · Crit {thr.nodePowerHot}W</div>
+              </div>
+            </div>
+
+            <div className="nd-body">
+              <div className="nd-card">
+                <h3>Resource Usage</h3>
+                <div className="nd-bar-grid">
+                  <div className="nd-bar-item">
+                    <div className="nd-bar-header">
+                      <span className="nd-bar-label">CPU</span>
+                      <span className={`nd-bar-value ${cpuTone}`}>{Math.round(node.cpu)}<span className="u">%</span></span>
+                    </div>
+                    <div className="nd-bar-track"><div className="nd-bar-fill" style={{ width:`${node.cpu}%`, background: colorFor(cpuTone) }} /></div>
+                    <MiniChart values={node.cpuHistory} color={colorFor(cpuTone)} height={52} />
+                  </div>
+                  <div className="nd-bar-item">
+                    <div className="nd-bar-header">
+                      <span className="nd-bar-label">Memory</span>
+                      <span className={`nd-bar-value ${memTone}`}>{node.memG.toFixed(1)}<span className="u">G</span></span>
+                    </div>
+                    <div className="nd-bar-track"><div className="nd-bar-fill" style={{ width:`${Math.min(100, node.memPct)}%`, background:"var(--mem)" }} /></div>
+                    <MiniChart values={node.memHistory} color="var(--mem)" height={52} />
+                  </div>
+                  <div className="nd-bar-item">
+                    <div className="nd-bar-header">
+                      <span className="nd-bar-label">Swap</span>
+                      <span className={`nd-bar-value ${swapTone}`}>{node.swapG.toFixed(1)}<span className="u">G</span></span>
+                    </div>
+                    <div className="nd-bar-track"><div className="nd-bar-fill" style={{ width:`${Math.min(100, node.swapPct)}%`, background:"var(--swap)" }} /></div>
+                    <MiniChart values={node.swapHistory} color="var(--swap)" height={52} />
+                  </div>
+                  <div className="nd-bar-item">
+                    <div className="nd-bar-header">
+                      <span className="nd-bar-label">Temperature</span>
+                      <span className={`nd-bar-value ${tempTone}`}>{Math.round(node.temp)}<span className="u">°C</span></span>
+                    </div>
+                    <div className="nd-bar-track"><div className="nd-bar-fill" style={{ width:`${Math.min(100,node.temp)}%`, background: colorFor(tempTone) }} /></div>
+                    <MiniChart values={node.tempHistory} color={colorFor(tempTone)} height={52} />
+                  </div>
+                </div>
+              </div>
+
+              <div className="nd-card">
+                <h3>Power Draw</h3>
+                <div style={{ marginBottom: 10 }}>
+                  <div className="nd-bar-header">
+                    <span className="nd-bar-label">Node Power</span>
+                    <span className={`nd-bar-value ${powTone}`} style={{ fontSize: 22 }}>{Math.round(node.power)}<span className="u">W</span></span>
+                  </div>
+                  <div className="nd-bar-track" style={{ height: 7, marginTop: 6 }}>
+                    <div className="nd-bar-fill" style={{ width:`${Math.min(100,(node.power/thr.nodePowerHot)*100)}%`, background: colorFor(powTone) }} />
+                  </div>
+                </div>
+                <MiniChart values={node.powerHistory.map(v => v * 10)} color={colorFor(powTone)} height={80} />
+                <div style={{ marginTop: 12, display: "flex", gap: 12 }}>
+                  {[["Warn threshold", `${thr.nodePowerWarn}W`], ["Crit threshold", `${thr.nodePowerHot}W`]].map(([k,v]) => (
+                    <div key={k} style={{ flex: 1, padding: "6px 10px", borderRadius: 8, background: "var(--surface-2)", border: "1px solid var(--line)" }}>
+                      <div style={{ fontSize: 9, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>{k}</div>
+                      <div style={{ fontSize: 16, fontWeight: 800, color: "var(--ink)", fontVariantNumeric: "tabular-nums" }}>{v}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="nd-card">
+                <h3>Thermal Sensors</h3>
+                {(() => {
+                  const therm = {};
+                  for (const m of node.rawMetrics || []) {
+                    if (m.module === "thermal" && typeof m.value === "number") therm[m.name] = m.value;
+                  }
+                  const toneFor = (val, warn, crit) => val >= crit ? "crit" : val >= warn ? "warn" : "";
+                  const sensors = [];
+
+                  // Per-CPU-package readings.
+                  const pkgKeys = Object.keys(therm).filter(k => /^cpu_package\d+_c$/.test(k)).sort();
+                  const cpuWarn = therm.cpu_warn_c ?? thr.tempWarn;
+                  const cpuCrit = therm.cpu_crit_c ?? thr.tempCrit;
+                  for (const k of pkgKeys) {
+                    const idx = k.match(/^cpu_package(\d+)_c$/)[1];
+                    const val = therm[k];
+                    sensors.push({ label: `CPU${idx}`, val, tone: toneFor(val, cpuWarn, cpuCrit) });
+                  }
+                  if (typeof therm.cpu_package_max_c === "number" && pkgKeys.length > 1) {
+                    const val = therm.cpu_package_max_c;
+                    sensors.push({ label: "CPU Max", val, tone: toneFor(val, cpuWarn, cpuCrit) });
+                  }
+
+                  if (typeof therm.nvme_max_c === "number") {
+                    const val = therm.nvme_max_c;
+                    const count = therm.nvme_count;
+                    const warn = therm.nvme_warn_c ?? 70;
+                    const crit = therm.nvme_crit_c ?? 80;
+                    sensors.push({ label: count ? `NVMe Max (${count|0})` : "NVMe Max", val, tone: toneFor(val, warn, crit) });
+                  }
+                  if (typeof therm.nic_max_c === "number") {
+                    const val = therm.nic_max_c;
+                    const count = therm.nic_count;
+                    const warn = therm.nic_warn_c ?? 85;
+                    const crit = therm.nic_crit_c ?? 95;
+                    sensors.push({ label: count ? `NIC Max (${count|0})` : "NIC Max", val, tone: toneFor(val, warn, crit) });
+                  }
+                  if (typeof therm.chipset_c === "number") {
+                    const val = therm.chipset_c;
+                    const warn = therm.chipset_warn_c ?? 75;
+                    const crit = therm.chipset_crit_c ?? 85;
+                    sensors.push({ label: "Chipset", val, tone: toneFor(val, warn, crit) });
+                  }
+
+                  // Fallback: any thermal.*_c reading we didn't already cover.
+                  const covered = new Set([...pkgKeys, "cpu_package_max_c", "nvme_max_c", "nic_max_c", "chipset_c",
+                                           "cpu_warn_c","cpu_crit_c","nvme_warn_c","nvme_crit_c","nic_warn_c","nic_crit_c","chipset_warn_c","chipset_crit_c"]);
+                  for (const [k, v] of Object.entries(therm)) {
+                    if (covered.has(k)) continue;
+                    if (!k.endsWith("_c")) continue;
+                    const label = k.replace(/_c$/, "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+                    sensors.push({ label, val: v, tone: toneFor(v, thr.tempWarn, thr.tempCrit) });
+                  }
+
+                  if (sensors.length === 0) {
+                    return <div style={{ fontSize: 12, color: "var(--muted)" }}>No thermal sensors reported.</div>;
+                  }
+
+                  return (
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(120px, 1fr))", gap:8 }}>
+                      {sensors.map(s => (
+                        <div key={s.label} className={`nd-kpi ${s.tone}`} style={{ padding:"10px 12px" }}>
+                          <div className="nd-kpi-label">{s.label}</div>
+                          <div className="nd-kpi-val" style={{ fontSize:18 }}>
+                            {typeof s.val === "number" ? s.val.toFixed(1) : "—"}
+                            <span className="u">°C</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
+
+              <div className="nd-card">
+                <h3>Fan Status</h3>
+                <div style={{ display:"flex", gap:16, marginBottom:14, flexWrap:"wrap" }}>
+                  {[
+                    { label:"Total fans", val: node.fanTotal || 0 },
+                    { label:"Fans OK",    val: node.fanOk || 0 },
+                    { label:"Avg RPM",    val: (node.fanRpm || 0).toFixed(0) },
+                    { label:"OK Ratio",   val: `${(fanRatio*100).toFixed(0)}%` },
+                  ].map(s => (
+                    <div key={s.label} style={{ flex:1, minWidth:80, padding:"8px 12px", borderRadius:8, background:"var(--surface-2)", border:"1px solid var(--line)" }}>
+                      <div style={{ fontSize:9, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", fontWeight:700 }}>{s.label}</div>
+                      <div style={{ fontSize:18, fontWeight:800, color:"var(--ink)", fontVariantNumeric:"tabular-nums" }}>{s.val}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="nd-fan-grid">
+                  {(node.perFan.length > 0 ? node.perFan : Array.from({ length: Math.max(0, node.fanTotal|0) }).map((_, i) => ({ name: `fan_${i+1}`, rpm: 0 })))
+                    .map((f, i) => {
+                      const ok = f.rpm > 0;
+                      const label = (f.name || "").replace(/_rpm$/, "").toUpperCase();
+                      return (
+                        <div key={f.name + i} className={`nd-fan-chip ${ok ? "ok" : "fail"}`}>
+                          <div className="nd-fan-label">{label || `FAN${i+1}`}</div>
+                          <div style={{ fontSize: 13, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>
+                            {ok ? `${(f.rpm/1000).toFixed(1)}k` : "FAIL"}
+                          </div>
+                          <div style={{ fontSize: 8, opacity: 0.7, fontWeight: 600 }}>RPM</div>
+                        </div>
+                      );
+                    })
+                  }
+                </div>
+              </div>
+
+              <div className="nd-card full">
+                <h3>Control Panel</h3>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+                  {controlActions.map((a,i) => (
+                    <button key={i} onClick={()=>alert(`[Placeholder] ${a.label}`)} style={{
+                      display:"flex",flexDirection:"column",alignItems:"flex-start",
+                      gap:4,padding:"12px 14px",borderRadius:10,
+                      border:`1px solid color-mix(in oklab, ${a.color} 25%, var(--line))`,
+                      background:`color-mix(in oklab, ${a.color} 7%, var(--surface-2))`,
+                      cursor:"pointer",textAlign:"left",fontFamily:"var(--font)",
+                      transition:"all 150ms",
+                    }}>
+                      <span style={{fontSize:18,lineHeight:1}}>{a.icon}</span>
+                      <span style={{fontSize:11,fontWeight:800,color:a.color}}>{a.label}</span>
+                      <span style={{fontSize:10,color:"var(--muted)",fontWeight:500}}>{a.desc}</span>
+                    </button>
+                  ))}
+                </div>
+                <div style={{marginTop:10,padding:"8px 12px",borderRadius:8,background:"var(--bg-2)",border:"1px solid var(--line)",fontSize:11,color:"var(--muted)",fontWeight:500}}>
+                  ⚠ Control actions are placeholders — wire to your cluster API to enable real execution.
+                </div>
+              </div>
+
+              <div className="nd-card full">
+                <h3>
+                  Raw Metrics
+                  <span style={{ fontSize:10, color:"var(--muted)", fontWeight:600, textTransform:"none", letterSpacing:0, marginLeft:4 }}>
+                    {rawRows.length} entries · updated {tsText}
+                  </span>
+                </h3>
+                <div style={{ overflowX:"auto" }}>
+                  <table className="nd-metrics-table">
+                    <thead>
+                      <tr>
+                        <th><button style={{ background:"none",border:"none",cursor:"pointer",font:"inherit",color:"inherit",padding:0 }} onClick={() => setSortAsc(a => !a)}>Module {sortAsc ? "↑" : "↓"}</button></th>
+                        <th>Metric</th>
+                        <th>Value</th>
+                        <th>Unit</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedMetrics.map((r, i) => (
+                        <tr key={`${r.module}-${r.name}-${i}`}>
+                          <td><span className="nd-module-badge">{r.module}</span></td>
+                          <td><span className="nd-metric-name">{r.name}</span></td>
+                          <td><span className="nd-metric-val">{formatMetricValue(r.value, r.name, r.unit)}</span></td>
+                          <td><span className="nd-metric-unit">{displayUnit(r.unit)}</span></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <footer className="nd-footer">
+              <span>Node <strong>{node.id}</strong><span className="dot-sep">·</span>{node.ip}<span className="dot-sep">·</span>Live data refresh 1.5s</span>
+              <span>HPC Cockpit<span className="dot-sep">·</span>NTU</span>
+            </footer>
+          </div>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById("root")).render(<NodeDetailPage />);
+    </script>
   </body>
 </html>

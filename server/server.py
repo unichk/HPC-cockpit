@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import socketserver
+import tempfile
 import threading
 import time
 from http import HTTPStatus
@@ -12,6 +13,143 @@ from urllib.parse import unquote
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+class ScheduleStore:
+    """Persists schedule events to a JSON file with atomic replace."""
+
+    def __init__(self, path: str) -> None:
+        self._lock = threading.Lock()
+        self._path = path
+        self._events: list = []
+        self._next_id: int = 1
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self._path):
+            return
+        try:
+            with open(self._path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+        events = data.get("events")
+        if isinstance(events, list):
+            cleaned: list = []
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                cleaned.append(self._normalize(ev))
+            self._events = [ev for ev in cleaned if ev is not None]
+        next_id = data.get("next_id")
+        if isinstance(next_id, int) and next_id > 0:
+            self._next_id = next_id
+        else:
+            self._next_id = max((int(e["id"]) for e in self._events), default=0) + 1
+
+    def _normalize(self, ev: dict):
+        try:
+            eid = int(ev["id"])
+            start_ms = int(ev["startMs"])
+            end_ms = int(ev["endMs"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        title = str(ev.get("title", ""))
+        nodes = str(ev.get("nodes", ""))
+        desc = str(ev.get("desc", ""))
+        return {
+            "id": eid,
+            "title": title,
+            "nodes": nodes,
+            "startMs": start_ms,
+            "endMs": end_ms,
+            "desc": desc,
+        }
+
+    def _save_locked(self) -> None:
+        payload = {"next_id": self._next_id, "events": self._events}
+        directory = os.path.dirname(os.path.abspath(self._path)) or "."
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".schedule-", suffix=".json.tmp", dir=directory
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+                handle.write("\n")
+            os.replace(tmp_path, self._path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    @staticmethod
+    def _validate_body(body: dict):
+        if not isinstance(body, dict):
+            return None, "body must be an object"
+        title = body.get("title", "")
+        nodes = body.get("nodes", "")
+        desc = body.get("desc", "")
+        start_ms = body.get("startMs")
+        end_ms = body.get("endMs")
+        if not isinstance(title, str) or not title.strip():
+            return None, "title required"
+        if not isinstance(nodes, str):
+            return None, "nodes must be a string"
+        if not isinstance(desc, str):
+            return None, "desc must be a string"
+        if not isinstance(start_ms, int) or not isinstance(end_ms, int):
+            return None, "startMs and endMs must be integers (ms since epoch)"
+        if end_ms <= start_ms:
+            return None, "endMs must be greater than startMs"
+        return {
+            "title": title.strip(),
+            "nodes": nodes,
+            "desc": desc,
+            "startMs": start_ms,
+            "endMs": end_ms,
+        }, None
+
+    def list_events(self) -> list:
+        with self._lock:
+            return [dict(ev) for ev in self._events]
+
+    def create(self, body: dict):
+        fields, err = self._validate_body(body)
+        if err:
+            return None, err
+        with self._lock:
+            event = {"id": self._next_id, **fields}
+            self._next_id += 1
+            self._events.append(event)
+            self._save_locked()
+            return dict(event), None
+
+    def update(self, event_id: int, body: dict):
+        fields, err = self._validate_body(body)
+        if err:
+            return None, err
+        with self._lock:
+            for idx, ev in enumerate(self._events):
+                if ev["id"] == event_id:
+                    updated = {"id": event_id, **fields}
+                    self._events[idx] = updated
+                    self._save_locked()
+                    return dict(updated), None
+        return None, "not found"
+
+    def delete(self, event_id: int) -> bool:
+        with self._lock:
+            for idx, ev in enumerate(self._events):
+                if ev["id"] == event_id:
+                    del self._events[idx]
+                    self._save_locked()
+                    return True
+        return False
 
 
 class StateStore:
@@ -88,6 +226,7 @@ class StateStore:
                         "received_at_ms": latest["received_at_ms"],
                         "age_ms": age_ms,
                         "metric_count": len(latest["metrics"]),
+                        "metrics": latest["metrics"],
                     }
                 )
         rows.sort(key=lambda item: item["node_id"])
@@ -401,6 +540,7 @@ class UdpHandler(socketserver.BaseRequestHandler):
 
 class ApiHandler(SimpleHTTPRequestHandler):
     state: StateStore = None
+    schedule: ScheduleStore = None
     test_mode: bool = False
 
     def __init__(self, *args, **kwargs):
@@ -433,11 +573,76 @@ class ApiHandler(SimpleHTTPRequestHandler):
             self._json(detail)
             return
 
+        if self.path == "/api/schedule":
+            self._json({"events": self.schedule.list_events()})
+            return
+
         if self.path == "/":
             self.path = "/index.html"
         return super().do_GET()
 
+    def do_PUT(self) -> None:
+        event_id = self._match_schedule_id()
+        if event_id is None:
+            self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        body = self._read_json_body()
+        if body is None:
+            return
+        event, err = self.schedule.update(event_id, body)
+        if err == "not found":
+            self._json({"error": err}, status=HTTPStatus.NOT_FOUND)
+            return
+        if err:
+            self._json({"error": err}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self._json(event)
+
+    def do_DELETE(self) -> None:
+        event_id = self._match_schedule_id()
+        if event_id is None:
+            self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        if not self.schedule.delete(event_id):
+            self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        self.send_response(HTTPStatus.NO_CONTENT.value)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _match_schedule_id(self):
+        prefix = "/api/schedule/"
+        if not self.path.startswith(prefix):
+            return None
+        try:
+            return int(self.path[len(prefix):])
+        except ValueError:
+            return None
+
+    def _read_json_body(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except Exception:
+            self._json({"error": "invalid json"}, status=HTTPStatus.BAD_REQUEST)
+            return None
+
     def do_POST(self) -> None:
+        if self.path == "/api/schedule":
+            body = self._read_json_body()
+            if body is None:
+                return
+            event, err = self.schedule.create(body)
+            if err:
+                self._json({"error": err}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._json(event, status=HTTPStatus.CREATED)
+            return
+
         if self.path == "/api/test/fake-nodes":
             if not self.test_mode:
                 self._json({"error": "test mode disabled"}, status=HTTPStatus.FORBIDDEN)
@@ -503,8 +708,15 @@ def start_udp_server(bind_host: str, bind_port: int, state: StateStore) -> socke
     return udp_server
 
 
-def start_http_server(bind_host: str, bind_port: int, state: StateStore, web_dir: str) -> ThreadingHTTPServer:
+def start_http_server(
+    bind_host: str,
+    bind_port: int,
+    state: StateStore,
+    schedule: ScheduleStore,
+    web_dir: str,
+) -> ThreadingHTTPServer:
     ApiHandler.state = state
+    ApiHandler.schedule = schedule
 
     def factory(*args, **kwargs):
         return ApiHandler(*args, web_dir=web_dir, **kwargs)
@@ -519,6 +731,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--http-host", default="0.0.0.0", help="HTTP bind host (default: 0.0.0.0)")
     parser.add_argument("--http-port", type=int, default=8080, help="HTTP bind port (default: 8080)")
     parser.add_argument("--test-panel", action="store_true", help="Enable test side panel in UI")
+    parser.add_argument(
+        "--schedule-file",
+        default=None,
+        help="Path to schedule JSON file (default: <server_dir>/schedule.json)",
+    )
     return parser.parse_args()
 
 
@@ -532,18 +749,23 @@ def main() -> int:
         return 2
     base_dir = os.path.dirname(os.path.abspath(__file__))
     web_dir = os.path.join(base_dir, "web")
+    schedule_path = args.schedule_file or os.path.join(base_dir, "schedule.json")
     state = StateStore()
+    schedule = ScheduleStore(schedule_path)
     ApiHandler.test_mode = args.test_panel
 
     udp_server = start_udp_server(args.udp_host, args.udp_port, state)
-    http_server = start_http_server(args.http_host, args.http_port, state, web_dir)
+    http_server = start_http_server(
+        args.http_host, args.http_port, state, schedule, web_dir
+    )
 
     udp_thread = threading.Thread(target=udp_server.serve_forever, daemon=True)
     udp_thread.start()
 
     print(
         f"udp_listen={args.udp_host}:{args.udp_port} "
-        f"http_listen={args.http_host}:{args.http_port} web_dir={web_dir}"
+        f"http_listen={args.http_host}:{args.http_port} "
+        f"web_dir={web_dir} schedule_file={schedule_path}"
     )
 
     try:
