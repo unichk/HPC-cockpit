@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import socket
 import socketserver
 import tempfile
 import threading
@@ -538,10 +539,66 @@ class UdpHandler(socketserver.BaseRequestHandler):
         self.state.ingest_snapshot(payload, remote_ip)
 
 
+def proxy_exec_to_worker(
+    remote_ip: str, port: int, token: str, cmd: str, timeout_s: int
+) -> tuple:
+    """Open a TCP connection to the worker's command_server, send one JSON
+    request line, read one JSON response line. Returns (payload_dict, None) on
+    success or (None, error_tag)."""
+    request = json.dumps(
+        {"token": token, "cmd": cmd, "timeout_s": timeout_s}, ensure_ascii=False
+    ) + "\n"
+    # Worker has its own per-command timeout; give the network hop + server-side
+    # wait a generous buffer so we don't cut off slow commands.
+    network_timeout = max(10, timeout_s + 10)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    try:
+        try:
+            sock.connect((remote_ip, port))
+        except (ConnectionRefusedError, OSError):
+            return None, "unreachable"
+        sock.settimeout(network_timeout)
+        try:
+            sock.sendall(request.encode("utf-8"))
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            return None, "send_failed"
+        chunks = []
+        total = 0
+        while True:
+            try:
+                chunk = sock.recv(65536)
+            except socket.timeout:
+                return None, "read_timeout"
+            except OSError:
+                return None, "read_failed"
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            # hard cap to match worker's per-response ceiling + envelope
+            if total > 8 * 1024 * 1024:
+                return None, "response_too_large"
+        raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
+        if not raw:
+            return None, "empty_response"
+        try:
+            return json.loads(raw), None
+        except json.JSONDecodeError:
+            return None, "bad_response"
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 class ApiHandler(SimpleHTTPRequestHandler):
     state: StateStore = None
     schedule: ScheduleStore = None
     test_mode: bool = False
+    worker_exec_port: int = 9100
 
     def __init__(self, *args, **kwargs):
         web_dir = kwargs.pop("web_dir")
@@ -643,6 +700,73 @@ class ApiHandler(SimpleHTTPRequestHandler):
             self._json(event, status=HTTPStatus.CREATED)
             return
 
+        exec_suffix = "/exec"
+        if self.path.startswith("/api/node/") and self.path.endswith(exec_suffix):
+            node_id = unquote(self.path[len("/api/node/") : -len(exec_suffix)])
+            if not node_id:
+                self._json({"error": "node id required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            token = self.headers.get("X-Exec-Token", "")
+            if not token:
+                self._json({"error": "X-Exec-Token header required"}, status=HTTPStatus.UNAUTHORIZED)
+                return
+            body = self._read_json_body()
+            if body is None:
+                return
+            if not isinstance(body, dict):
+                self._json({"error": "body must be an object"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            cmd = body.get("cmd", "")
+            timeout_s = body.get("timeout_s", 0)
+            if not isinstance(cmd, str) or not cmd.strip():
+                self._json({"error": "cmd required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if len(cmd) > 32 * 1024:
+                self._json({"error": "cmd too long"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if not isinstance(timeout_s, int) or timeout_s < 0 or timeout_s > 300:
+                self._json(
+                    {"error": "timeout_s must be integer in [0, 300]"},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            detail = self.state.node_detail(node_id)
+            latest = detail.get("latest") if detail else None
+            remote_ip = latest.get("remote_ip") if isinstance(latest, dict) else None
+            if not remote_ip:
+                self._json({"error": "node not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            resp, err = proxy_exec_to_worker(
+                remote_ip, self.worker_exec_port, token, cmd, timeout_s or 30
+            )
+            if err is not None:
+                status_map = {
+                    "unreachable": HTTPStatus.SERVICE_UNAVAILABLE,
+                    "send_failed": HTTPStatus.BAD_GATEWAY,
+                    "read_failed": HTTPStatus.BAD_GATEWAY,
+                    "read_timeout": HTTPStatus.GATEWAY_TIMEOUT,
+                    "empty_response": HTTPStatus.BAD_GATEWAY,
+                    "bad_response": HTTPStatus.BAD_GATEWAY,
+                    "response_too_large": HTTPStatus.BAD_GATEWAY,
+                }
+                self._json(
+                    {"error": err, "node_id": node_id},
+                    status=status_map.get(err, HTTPStatus.BAD_GATEWAY),
+                )
+                return
+            if not isinstance(resp, dict):
+                self._json({"error": "bad_response"}, status=HTTPStatus.BAD_GATEWAY)
+                return
+            stdout_len = len(resp.get("stdout", "")) if isinstance(resp.get("stdout"), str) else 0
+            stderr_len = len(resp.get("stderr", "")) if isinstance(resp.get("stderr"), str) else 0
+            print(
+                f"exec node={node_id} exit={resp.get('exit')} "
+                f"signal={resp.get('signal')} out={stdout_len}b err={stderr_len}b "
+                f"trunc={resp.get('truncated')} tag={resp.get('error')}"
+            )
+            self._json(resp)
+            return
+
         if self.path == "/api/test/fake-nodes":
             if not self.test_mode:
                 self._json({"error": "test mode disabled"}, status=HTTPStatus.FORBIDDEN)
@@ -714,9 +838,11 @@ def start_http_server(
     state: StateStore,
     schedule: ScheduleStore,
     web_dir: str,
+    worker_exec_port: int,
 ) -> ThreadingHTTPServer:
     ApiHandler.state = state
     ApiHandler.schedule = schedule
+    ApiHandler.worker_exec_port = worker_exec_port
 
     def factory(*args, **kwargs):
         return ApiHandler(*args, web_dir=web_dir, **kwargs)
@@ -736,6 +862,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to schedule JSON file (default: <server_dir>/schedule.json)",
     )
+    parser.add_argument(
+        "--worker-exec-port",
+        type=int,
+        default=9100,
+        help="TCP port where the hpc_worker command channel listens (default: 9100)",
+    )
     return parser.parse_args()
 
 
@@ -754,9 +886,18 @@ def main() -> int:
     schedule = ScheduleStore(schedule_path)
     ApiHandler.test_mode = args.test_panel
 
+    if args.worker_exec_port <= 0 or args.worker_exec_port > 65535:
+        print("error: worker-exec-port must be between 1 and 65535")
+        return 2
+
     udp_server = start_udp_server(args.udp_host, args.udp_port, state)
     http_server = start_http_server(
-        args.http_host, args.http_port, state, schedule, web_dir
+        args.http_host,
+        args.http_port,
+        state,
+        schedule,
+        web_dir,
+        args.worker_exec_port,
     )
 
     udp_thread = threading.Thread(target=udp_server.serve_forever, daemon=True)

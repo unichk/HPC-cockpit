@@ -83,6 +83,34 @@
         .nd-body { grid-template-columns: 1fr; }
         .nd-fan-grid { grid-template-columns: repeat(4, 1fr); }
       }
+
+      .nd-modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.5); backdrop-filter: blur(3px); z-index: 500; display: flex; align-items: center; justify-content: center; }
+      .nd-modal { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); width: 760px; max-width: calc(100vw - 32px); height: 580px; max-height: calc(100vh - 32px); display: flex; flex-direction: column; box-shadow: var(--shadow-md); overflow: hidden; }
+      .nd-modal-head { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; background: var(--surface-2); }
+      .nd-modal-title { font-size: 13px; font-weight: 800; color: var(--ink); font-family: var(--mono); letter-spacing: -0.01em; }
+      .nd-modal-warn { font-size: 10px; color: var(--crit); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; }
+      .nd-modal-close { margin-left: auto; background: none; border: 1px solid var(--line); border-radius: 6px; width: 28px; height: 28px; cursor: pointer; font-size: 14px; color: var(--muted); display: flex; align-items: center; justify-content: center; }
+      .nd-modal-close:hover { background: var(--accent-soft); color: var(--ink); }
+      .nd-shell-log { flex: 1; overflow: auto; padding: 12px 14px; background: var(--surface-2); font-family: var(--mono); font-size: 12px; line-height: 1.45; color: var(--ink); white-space: pre-wrap; word-break: break-all; }
+      .nd-shell-log .prompt { color: var(--accent); font-weight: 700; }
+      .nd-shell-log .out { color: var(--ink); }
+      .nd-shell-log .err { color: var(--crit); }
+      .nd-shell-log .meta { color: var(--muted); font-size: 11px; font-weight: 600; }
+      .nd-shell-log .meta.ok { color: var(--ok); }
+      .nd-shell-log .meta.bad { color: var(--crit); }
+      .nd-shell-log .blk { margin-bottom: 10px; }
+      .nd-shell-tokenrow { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); background: var(--surface); font-size: 12px; }
+      .nd-shell-tokenrow input { flex: 1; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; font-family: var(--mono); font-size: 12px; background: var(--surface-2); color: var(--ink); }
+      .nd-shell-tokenrow button { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; font-weight: 700; cursor: pointer; font-size: 12px; }
+      .nd-shell-tokenrow .lbl { font-size: 11px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; min-width: 48px; }
+      .nd-shell-tokenrow .change { color: var(--accent); cursor: pointer; font-weight: 700; font-size: 11px; }
+      .nd-shell-cmdrow { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); background: var(--surface); }
+      .nd-shell-cmdrow input { flex: 1; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font-family: var(--mono); font-size: 13px; background: var(--surface-2); color: var(--ink); }
+      .nd-shell-cmdrow input:focus { outline: none; border-color: var(--accent); background: var(--surface); }
+      .nd-shell-cmdrow button { padding: 8px 16px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; font-weight: 800; cursor: pointer; font-size: 12px; letter-spacing: 0.04em; }
+      .nd-shell-cmdrow button.ghost { background: transparent; color: var(--muted); border-color: var(--line); font-weight: 700; }
+      .nd-shell-cmdrow button.ghost:hover:not(:disabled) { color: var(--ink); border-color: var(--muted); }
+      .nd-shell-cmdrow button:disabled { opacity: 0.5; cursor: not-allowed; }
     </style>
   </head>
   <body>
@@ -179,6 +207,181 @@
         return THR;
       }
 
+      function ShellModal({ nodeId, onClose }) {
+        const { useRef } = React;
+        const [token, setToken] = useState(() => sessionStorage.getItem("cockpit_exec_token") || "");
+        const [tokenDraft, setTokenDraft] = useState("");
+        const [editingToken, setEditingToken] = useState(() => !sessionStorage.getItem("cockpit_exec_token"));
+        const [cmd, setCmd] = useState("");
+        const [blocks, setBlocks] = useState([]);
+        const [runningCount, setRunningCount] = useState(0);
+        const [historyIdx, setHistoryIdx] = useState(-1);
+        const history = useRef(JSON.parse(sessionStorage.getItem("cockpit_exec_history") || "[]"));
+        const logRef = useRef(null);
+        const inputRef = useRef(null);
+        const blockSeq = useRef(0);
+
+        useEffect(() => {
+          const onKey = (e) => { if (e.key === "Escape") onClose(); };
+          window.addEventListener("keydown", onKey);
+          return () => window.removeEventListener("keydown", onKey);
+        }, [onClose]);
+
+        useEffect(() => {
+          if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+        }, [blocks]);
+
+        useEffect(() => { if (!editingToken && inputRef.current) inputRef.current.focus(); }, [editingToken]);
+
+        function saveToken() {
+          const t = tokenDraft.trim();
+          if (!t) return;
+          sessionStorage.setItem("cockpit_exec_token", t);
+          setToken(t);
+          setTokenDraft("");
+          setEditingToken(false);
+        }
+
+        function pushHistory(c) {
+          const arr = history.current.filter(h => h !== c);
+          arr.push(c);
+          if (arr.length > 50) arr.splice(0, arr.length - 50);
+          history.current = arr;
+          try { sessionStorage.setItem("cockpit_exec_history", JSON.stringify(arr)); } catch {}
+        }
+
+        async function runCmd() {
+          const c = cmd.trim();
+          if (!c || !token) return;
+          pushHistory(c);
+          const id = ++blockSeq.current;
+          setBlocks(b => [...b, { id, cmd: c, pending: true }]);
+          setCmd("");
+          setHistoryIdx(-1);
+          setRunningCount(n => n + 1);
+          const start = performance.now();
+          let result;
+          try {
+            const r = await fetch(`/api/node/${encodeURIComponent(nodeId)}/exec`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-Exec-Token": token },
+              body: JSON.stringify({ cmd: c, timeout_s: 30 }),
+            });
+            const raw = await r.text();
+            let body = null;
+            try { body = JSON.parse(raw); } catch {}
+            if (!r.ok) {
+              result = { id, cmd: c, error: (body && body.error) || `HTTP ${r.status}`, exit: -1, stdout: "", stderr: "" };
+            } else {
+              result = { id, cmd: c, ...body };
+            }
+          } catch (err) {
+            result = { id, cmd: c, error: String(err && err.message || err), exit: -1, stdout: "", stderr: "" };
+          }
+          result.durationMs = Math.round(performance.now() - start);
+          setBlocks(b => b.map(x => (x.id === id ? result : x)));
+          setRunningCount(n => Math.max(0, n - 1));
+        }
+
+        function onKey(e) {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            runCmd();
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            const h = history.current;
+            if (h.length === 0) return;
+            const next = historyIdx < 0 ? h.length - 1 : Math.max(0, historyIdx - 1);
+            setHistoryIdx(next);
+            setCmd(h[next]);
+          } else if (e.key === "ArrowDown") {
+            e.preventDefault();
+            const h = history.current;
+            if (historyIdx < 0) return;
+            const next = historyIdx + 1;
+            if (next >= h.length) { setHistoryIdx(-1); setCmd(""); }
+            else { setHistoryIdx(next); setCmd(h[next]); }
+          }
+        }
+
+        return (
+          <div className="nd-modal-bg" onClick={e => e.target === e.currentTarget && onClose()}>
+            <div className="nd-modal" onClick={e => e.stopPropagation()}>
+              <div className="nd-modal-head">
+                <span className="nd-modal-title">Shell · {nodeId}</span>
+                <span className="nd-modal-warn">⚠ Runs as root · emergency use</span>
+                <button className="nd-modal-close" onClick={onClose} title="Close (Esc)">×</button>
+              </div>
+              <div className="nd-shell-log" ref={logRef}>
+                {blocks.length === 0 && (
+                  <div className="meta">
+                    {token
+                      ? "Ready. Type a command and press Enter. ↑/↓ for history."
+                      : "Enter the worker's exec_token below to unlock."}
+                  </div>
+                )}
+                {blocks.map((b, i) => (
+                  <div key={i} className="blk">
+                    <div><span className="prompt">$</span> <span className="out">{b.cmd}</span></div>
+                    {b.pending && <div className="meta">running…</div>}
+                    {b.stdout && <div className="out">{b.stdout}</div>}
+                    {b.stderr && <div className="err">{b.stderr}</div>}
+                    {!b.pending && (() => {
+                      const bits = [];
+                      if (typeof b.exit === "number") bits.push(`exit=${b.exit}`);
+                      if (b.signal) bits.push(`signal=${b.signal}`);
+                      if (b.truncated) bits.push("truncated");
+                      if (b.error) bits.push(`error=${b.error}`);
+                      if (typeof b.durationMs === "number") bits.push(`${b.durationMs}ms`);
+                      const tone = (b.error || (typeof b.exit === "number" && b.exit !== 0)) ? "bad" : "ok";
+                      return <div className={`meta ${tone}`}>— {bits.join(" · ")}</div>;
+                    })()}
+                  </div>
+                ))}
+              </div>
+              {editingToken ? (
+                <div className="nd-shell-tokenrow">
+                  <span className="lbl">Token</span>
+                  <input
+                    type="password"
+                    value={tokenDraft}
+                    onChange={e => setTokenDraft(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && saveToken()}
+                    placeholder="exec_token from worker.conf"
+                    autoFocus
+                  />
+                  <button onClick={saveToken} disabled={!tokenDraft.trim()}>Save</button>
+                </div>
+              ) : (
+                <div className="nd-shell-tokenrow">
+                  <span className="lbl">Token</span>
+                  <span style={{ flex: 1, fontFamily: "var(--mono)", fontSize: 12, color: "var(--muted)" }}>
+                    •••••••• (session)
+                  </span>
+                  <span className="change" onClick={() => { setEditingToken(true); setTokenDraft(""); }}>[change]</span>
+                </div>
+              )}
+              <div className="nd-shell-cmdrow">
+                <input
+                  ref={inputRef}
+                  value={cmd}
+                  onChange={e => setCmd(e.target.value)}
+                  onKeyDown={onKey}
+                  placeholder={token ? (runningCount > 0 ? `running (${runningCount})… type next command` : "command (Enter to run)") : "set token first"}
+                  disabled={!token}
+                />
+                <button className="ghost" onClick={() => setBlocks([])} disabled={blocks.length === 0} title="Clear terminal output">
+                  Clear
+                </button>
+                <button onClick={runCmd} disabled={!token || !cmd.trim()}>
+                  Run{runningCount > 0 ? ` (${runningCount})` : ""}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
       function NodeDetailPage() {
         const params = new URLSearchParams(window.location.search);
         const nodeId = params.get("node") || "";
@@ -186,6 +389,7 @@
         const [node, setNode] = useState(null);
         const [sortAsc, setSortAsc] = useState(true);
         const [notFound, setNotFound] = useState(false);
+        const [shellOpen, setShellOpen] = useState(false);
         const now = useClock();
         const thr = useMemo(readThresholdsFromSettings, []);
 
@@ -236,10 +440,10 @@
         const tsText = node.timestampMs ? new Date(node.timestampMs).toLocaleTimeString("en-US",{hour12:false}) : "—";
 
         const controlActions = [
+          {label:"Emergency Shell", icon:"›_", color:"var(--warn)",   desc:"Run a shell command on this node", onClick:() => setShellOpen(true)},
           {label:"Reboot Node",     icon:"↺", color:"var(--warn)",   desc:"Graceful OS restart"},
           {label:"Power Off",       icon:"⏻", color:"var(--crit)",   desc:"Hard power down"},
           {label:"Reset BMC",       icon:"⟳", color:"var(--accent)", desc:"Restart baseboard controller"},
-          {label:"Clear Job Queue", icon:"✕", color:"var(--muted)",  desc:"Cancel all pending jobs"},
           {label:"Run Diagnostics", icon:"⚙", color:"var(--ok)",     desc:"Self-test & health check"},
           {label:"Export Logs",     icon:"↓", color:"var(--accent)", desc:"Download last 24h logs"},
           {label:"Set Maintenance", icon:"🔧", color:"var(--warn)",  desc:"Mark node as under maintenance"},
@@ -491,7 +695,7 @@
                 <h3>Control Panel</h3>
                 <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
                   {controlActions.map((a,i) => (
-                    <button key={i} onClick={()=>alert(`[Placeholder] ${a.label}`)} style={{
+                    <button key={i} onClick={a.onClick || (()=>alert(`[Placeholder] ${a.label}`))} style={{
                       display:"flex",flexDirection:"column",alignItems:"flex-start",
                       gap:4,padding:"12px 14px",borderRadius:10,
                       border:`1px solid color-mix(in oklab, ${a.color} 25%, var(--line))`,
@@ -546,6 +750,8 @@
               <span>Node <strong>{node.id}</strong><span className="dot-sep">·</span>{node.ip}<span className="dot-sep">·</span>Live data refresh 1.5s</span>
               <span>HPC Cockpit<span className="dot-sep">·</span>NTU</span>
             </footer>
+
+            {shellOpen && <ShellModal nodeId={node.id} onClose={() => setShellOpen(false)} />}
           </div>
         );
       }

@@ -94,6 +94,35 @@ bool LoadConfig(const std::string& path, WorkerConfig& config, std::string& erro
       }
     } else if (key == "modules") {
       config.modules = SplitCsv(value);
+    } else if (key == "exec_enabled") {
+      std::string v = value;
+      std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return std::tolower(c); });
+      config.exec_enabled = (v == "1" || v == "true" || v == "yes" || v == "on");
+    } else if (key == "exec_bind_host") {
+      config.exec_bind_host = value;
+    } else if (key == "exec_port") {
+      try {
+        config.exec_port = std::stoi(value);
+      } catch (...) {
+        error = "invalid exec_port at line " + std::to_string(line_no);
+        return false;
+      }
+    } else if (key == "exec_token") {
+      config.exec_token = value;
+    } else if (key == "exec_max_output_kb") {
+      try {
+        config.exec_max_output_kb = std::stoi(value);
+      } catch (...) {
+        error = "invalid exec_max_output_kb at line " + std::to_string(line_no);
+        return false;
+      }
+    } else if (key == "exec_default_timeout_s") {
+      try {
+        config.exec_default_timeout_s = std::stoi(value);
+      } catch (...) {
+        error = "invalid exec_default_timeout_s at line " + std::to_string(line_no);
+        return false;
+      }
     } else {
       error = "unknown config key at line " + std::to_string(line_no) + ": " + key;
       return false;
@@ -110,6 +139,18 @@ bool LoadConfig(const std::string& path, WorkerConfig& config, std::string& erro
   }
   if (config.transport_udp_port <= 0 || config.transport_udp_port > 65535) {
     error = "transport_udp_port must be between 1 and 65535";
+    return false;
+  }
+  if (config.exec_port <= 0 || config.exec_port > 65535) {
+    error = "exec_port must be between 1 and 65535";
+    return false;
+  }
+  if (config.exec_max_output_kb < 1 || config.exec_max_output_kb > 4096) {
+    error = "exec_max_output_kb must be between 1 and 4096";
+    return false;
+  }
+  if (config.exec_default_timeout_s < 1 || config.exec_default_timeout_s > 300) {
+    error = "exec_default_timeout_s must be between 1 and 300";
     return false;
   }
   if (config.node_id.empty()) {

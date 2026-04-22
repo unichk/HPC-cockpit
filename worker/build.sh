@@ -20,6 +20,7 @@ g++ -std=c++17 -Wall -Wextra -Wpedantic \
   "${ROOT_DIR}/src/main.cpp" \
   "${ROOT_DIR}/src/config.cpp" \
   "${ROOT_DIR}/src/worker.cpp" \
+  "${ROOT_DIR}/src/command_server.cpp" \
   "${ROOT_DIR}/src/collector_registry.cpp" \
   "${ROOT_DIR}/src/transport_registry.cpp" \
   "${ROOT_DIR}/src/collectors/cpu_collector.cpp" \
@@ -31,6 +32,7 @@ g++ -std=c++17 -Wall -Wextra -Wpedantic \
   "${ROOT_DIR}/src/transports/stdout_transport.cpp" \
   "${ROOT_DIR}/src/transports/udp_transport.cpp" \
   -I"${ROOT_DIR}/src" \
+  -pthread \
   -o "${BIN_PATH}"
 
 echo "Built with g++: ${BIN_PATH}"

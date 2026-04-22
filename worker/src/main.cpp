@@ -1,8 +1,13 @@
 #include "collector_registry.h"
+#include "command_server.h"
 #include "config.h"
 #include "transport_registry.h"
 #include "worker.h"
 
+#include <sys/mman.h>
+
+#include <cerrno>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -18,6 +23,15 @@ int main(int argc, char** argv) {
   if (!LoadConfig(config_path, config, config_error)) {
     std::cerr << "config_error " << config_error << "\n";
     return 1;
+  }
+
+  // Pin all worker pages so we stay responsive when the machine is under
+  // heavy memory pressure. Non-fatal if it fails (e.g. no CAP_IPC_LOCK).
+  if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+    std::cout << "mlockall_failed errno=" << errno << " (" << std::strerror(errno)
+              << ") — running with pages swappable" << std::endl;
+  } else {
+    std::cout << "mlockall_ok" << std::endl;
   }
 
   std::string transport_error;
@@ -38,6 +52,16 @@ int main(int argc, char** argv) {
     collectors.push_back(std::move(collector));
   }
 
+  CommandServer command_server;
+  if (config.exec_enabled) {
+    std::string cmd_err;
+    if (!command_server.Start(config, cmd_err)) {
+      std::cout << "command_server_start_failed " << cmd_err << std::endl;
+    } else {
+      std::cout << "command_server_listen port=" << config.exec_port << std::endl;
+    }
+  }
+
   if (config.transport == "udp") {
     std::cout << "transport_start udp destination=" << config.transport_udp_host << ":"
               << config.transport_udp_port << std::endl;
@@ -46,5 +70,7 @@ int main(int argc, char** argv) {
   }
 
   Worker worker(std::move(config), std::move(collectors), std::move(transport));
-  return worker.Run();
+  int rc = worker.Run();
+  command_server.Stop();
+  return rc;
 }

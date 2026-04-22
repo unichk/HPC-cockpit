@@ -9,6 +9,7 @@ add_executable(hpc_worker
   src/main.cpp
   src/config.cpp
   src/worker.cpp
+  src/command_server.cpp
   src/collector_registry.cpp
   src/transport_registry.cpp
   src/collectors/cpu_collector.cpp
@@ -22,4 +23,5 @@ add_executable(hpc_worker
 )
 
 target_include_directories(hpc_worker PRIVATE src)
-target_compile_options(hpc_worker PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(hpc_worker PRIVATE -Wall -Wextra -Wpedantic -pthread)
+target_link_options(hpc_worker PRIVATE -pthread)
