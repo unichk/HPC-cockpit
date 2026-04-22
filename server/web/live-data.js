@@ -5,6 +5,23 @@ const HISTORY_LEN = 60;
 const POLL_MS = 1500;
 const KB_PER_GIB = 1024 * 1024;
 
+// CPU governor encoding must mirror cpu_collector.cpp's GovernorCode().
+const GOVERNOR_NAMES = [null, "performance", "powersave", "schedutil", "ondemand", "conservative", "userspace"];
+
+function governorName(code) {
+  const c = code | 0;
+  return (c > 0 && c < GOVERNOR_NAMES.length) ? GOVERNOR_NAMES[c] : "";
+}
+
+function governorsFromMask(mask) {
+  const m = mask | 0;
+  const out = [];
+  for (let i = 1; i < GOVERNOR_NAMES.length; i++) {
+    if (m & (1 << (i - 1))) out.push(GOVERNOR_NAMES[i]);
+  }
+  return out;
+}
+
 const DEFAULT_THRESHOLDS = {
   ageWarn: 15,
   ageStale: 60,
@@ -130,6 +147,11 @@ function mapNode(raw, nowMs) {
   const ageSec = Math.max(0, (nowMs - (raw.received_at_ms || nowMs)) / 1000);
 
   const cpu = pickNum(idx, "cpu.usage");
+  const cpuFreqCapKhz = pickNum(idx, "cpu.freq_cap_khz");
+  const cpuFreqMinKhz = pickNum(idx, "cpu.freq_min_khz");
+  const cpuFreqMaxKhz = pickNum(idx, "cpu.freq_max_khz");
+  const cpuGovernorCode = pickNum(idx, "cpu.governor_code");
+  const cpuGovernorsMask = pickNum(idx, "cpu.governors_mask");
   const memUsedKb = pickNum(idx, "memory.used");
   const memTotalKb = pickNum(idx, "memory.total");
   const swapUsedKb = pickNum(idx, "memory.swap_used");
@@ -193,6 +215,11 @@ function mapNode(raw, nowMs) {
       nicMax: pickNum(idx, "thermal.nic_max_c"),
       chipset: pickNum(idx, "thermal.chipset_c"),
     },
+    cpuFreqMhz: cpuFreqCapKhz > 0 ? cpuFreqCapKhz / 1000 : 0,
+    cpuFreqMinMhz: cpuFreqMinKhz > 0 ? cpuFreqMinKhz / 1000 : 0,
+    cpuFreqMaxMhz: cpuFreqMaxKhz > 0 ? cpuFreqMaxKhz / 1000 : 0,
+    cpuGovernor: governorName(cpuGovernorCode),
+    cpuGovernorsAvailable: governorsFromMask(cpuGovernorsMask),
     rawMetrics: raw.metrics || [],
     timestampMs: raw.timestamp_ms || 0,
     receivedAtMs: raw.received_at_ms || 0,
