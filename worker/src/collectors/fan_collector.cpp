@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <cstdio>
+#include <fstream>
 #include <numeric>
 #include <regex>
 #include <sstream>
@@ -11,6 +12,25 @@
 #include <vector>
 
 namespace {
+
+// DMI chassis vendor → numeric code. Mirrors FAN_VENDOR_NAMES in
+// server/web/live-data.js; the UI uses the code to pick which IPMI OEM
+// opcodes to send from FAN_CMDS in node.html.
+int DetectFanVendor() {
+  std::ifstream in("/sys/class/dmi/id/sys_vendor");
+  if (!in.is_open()) return 0;
+  std::string line;
+  std::getline(in, line);
+  std::string lower;
+  lower.reserve(line.size());
+  for (char ch : line) lower.push_back(std::tolower(static_cast<unsigned char>(ch)));
+  if (lower.find("supermicro") != std::string::npos) return 1;
+  if (lower.find("dell") != std::string::npos) return 2;
+  if (lower.find("hpe") != std::string::npos ||
+      lower.find("hewlett packard") != std::string::npos) return 3;
+  if (lower.find("inventec") != std::string::npos) return 4;
+  return 0;
+}
 
 std::string Trim(const std::string& value) {
   std::size_t start = 0;
@@ -96,6 +116,8 @@ class FanCollector : public Collector {
   std::string Name() const override { return "fan"; }
 
   bool Collect(std::vector<Metric>& out, std::string& error) override {
+    out.push_back(Metric{"fan", "vendor_code", static_cast<double>(vendor_code_), "enum"});
+
     std::string payload;
     if (!RunCommand("ipmi-sensors --sensor-type=Fan 2>&1", payload)) {
       out.push_back(Metric{"fan", "available", 0.0, "bool"});
@@ -177,6 +199,7 @@ class FanCollector : public Collector {
 
  private:
   bool last_available_ = true;
+  int vendor_code_ = DetectFanVendor();
 };
 
 }  // namespace

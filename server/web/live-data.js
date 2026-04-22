@@ -8,6 +8,14 @@ const KB_PER_GIB = 1024 * 1024;
 // CPU governor encoding must mirror cpu_collector.cpp's GovernorCode().
 const GOVERNOR_NAMES = [null, "performance", "powersave", "schedutil", "ondemand", "conservative", "userspace"];
 
+// Fan/chassis vendor encoding must mirror fan_collector.cpp's DetectFanVendor().
+const FAN_VENDOR_NAMES = [null, "supermicro", "dell", "hpe", "inventec"];
+
+function fanVendorName(code) {
+  const c = code | 0;
+  return (c > 0 && c < FAN_VENDOR_NAMES.length) ? FAN_VENDOR_NAMES[c] : "unknown";
+}
+
 function governorName(code) {
   const c = code | 0;
   return (c > 0 && c < GOVERNOR_NAMES.length) ? GOVERNOR_NAMES[c] : "";
@@ -168,6 +176,7 @@ function mapNode(raw, nowMs) {
   const fanCount = pickNum(idx, "fan.count");
   const fanOk = pickNum(idx, "fan.ok_count");
   const fanRpm = pickNum(idx, "fan.avg_rpm");
+  const fanVendorCode = pickNum(idx, "fan.vendor_code");
 
   const load = [
     pickNum(idx, "load.avg1"),
@@ -209,6 +218,7 @@ function mapNode(raw, nowMs) {
     fanOk,
     fanTotal: fanCount,
     fanRpm,
+    fanVendor: fanVendorName(fanVendorCode),
     perFan: perFanRpms(raw.metrics),
     extraThermal: {
       nvmeMax: pickNum(idx, "thermal.nvme_max_c"),
