@@ -528,7 +528,7 @@
 
         return (
           <div className="nd-modal-bg" onClick={e => e.target === e.currentTarget && onClose()}>
-            <div className="nd-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 620, minHeight: 0 }}>
+            <div className="nd-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 620, height: "auto" }}>
               <div className="nd-modal-head">
                 <span className="nd-modal-title">CPU Frequency · {nodeId}</span>
                 <span className="nd-modal-warn">⚠ Clamps all cores · root</span>
