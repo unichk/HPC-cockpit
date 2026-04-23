@@ -19,7 +19,7 @@
       .nd-spacer { flex: 1; }
       .nd-clock { font-size: 12px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
 
-      .nd-summary { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }
+      .nd-summary { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; }
       .nd-kpi { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; box-shadow: var(--shadow-sm); }
       .nd-kpi.warn { border-color: color-mix(in oklab, var(--warn) 40%, var(--line)); background: color-mix(in oklab, var(--warn) 6%, var(--surface)); }
       .nd-kpi.crit { border-color: color-mix(in oklab, var(--crit) 40%, var(--line)); background: color-mix(in oklab, var(--crit) 6%, var(--surface)); }
@@ -123,7 +123,7 @@
     <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
-    <script src="live-data.js?v=2"></script>
+    <script src="live-data.js?v=6"></script>
     <script type="text/babel">
       const { useState, useEffect, useMemo } = React;
       const THR = window.DEFAULT_THRESHOLDS;
@@ -829,6 +829,260 @@
         );
       }
 
+      // NOTE: UNTESTED — the dev cluster has no GPU, so these commands were
+      // assembled from rocm-smi / nvidia-smi docs and have never been run on
+      // real hardware. Before relying on them:
+      //   1. Verify the tool is on $PATH on the GPU host.
+      //   2. Try the generated command by hand once on the first GPU node.
+      //   3. The modal always surfaces stdout/stderr — read before trusting.
+      //
+      // Map key → vendor name from gpu_collector.cpp's GpuVendor enum
+      // (exposed via live-data.js as node.gpus[i].vendor).
+      const GPU_CMDS = {
+        amd: {
+          setPowerCap: (i, w) => `rocm-smi -d ${i} --setpoweroverdrive ${w} --autorespond y\necho "cap=${w}W"`,
+          setPerfLevel: (i, lvl) => {
+            // rocm-smi --setperflevel accepts: auto, low, high, manual, profile_*
+            const rocmLvl = { low: "low", balanced: "auto", performance: "high", max: "high" }[lvl] || "auto";
+            return `rocm-smi -d ${i} --setperflevel ${rocmLvl} --autorespond y\necho "perf=${rocmLvl}"`;
+          },
+          restore: (i) =>
+            `rocm-smi -d ${i} --resetpoweroverdrive --autorespond y && ` +
+            `rocm-smi -d ${i} --setperflevel auto --autorespond y\necho "restored"`,
+        },
+        nvidia: {
+          setPowerCap: (i, w) =>
+            `nvidia-smi -i ${i} -pm 1 >/dev/null && nvidia-smi -i ${i} -pl ${w}\necho "cap=${w}W"`,
+          setPerfLevel: (i, lvl) => {
+            // NOTE: UNTESTED — clock ranges are placeholders. The modal shows
+            // the full command verbatim in the result pane so the operator can
+            // sanity-check it before reaching for hardware-specific ranges.
+            const arg = { low: "-lgc 300,800", balanced: "-rgc", performance: "-lgc 1200,1800", max: "-lgc 1500,2100" }[lvl] || "-rgc";
+            return `nvidia-smi -i ${i} ${arg}\necho "perf=${lvl}"`;
+          },
+          restore: (i) =>
+            `nvidia-smi -i ${i} -rgc\necho "clocks reset to default (power cap untouched — re-apply via Apply if needed)"`,
+        },
+      };
+
+      function GpuModal({ nodeId, node, onClose }) {
+        const [token, setToken] = useState(() => sessionStorage.getItem("cockpit_exec_token") || "");
+        const [tokenDraft, setTokenDraft] = useState("");
+        const [editingToken, setEditingToken] = useState(() => !sessionStorage.getItem("cockpit_exec_token"));
+        const [sel, setSel] = useState(0);
+        const [customW, setCustomW] = useState("");
+        const [level, setLevel] = useState("balanced");
+        const [busy, setBusy] = useState(false);
+        const [result, setResult] = useState(null);
+
+        const gpus = Array.isArray(node.gpus) ? node.gpus : [];
+        const selected = gpus[sel] || null;
+        const vendor = selected ? selected.vendor : "unknown";
+        const cmds = GPU_CMDS[vendor];
+        const supported = !!cmds;
+
+        useEffect(() => {
+          const onKey = (e) => { if (e.key === "Escape") onClose(); };
+          window.addEventListener("keydown", onKey);
+          return () => window.removeEventListener("keydown", onKey);
+        }, [onClose]);
+
+        function saveToken() {
+          const t = tokenDraft.trim();
+          if (!t) return;
+          sessionStorage.setItem("cockpit_exec_token", t);
+          setToken(t); setTokenDraft(""); setEditingToken(false);
+        }
+
+        async function runExec(cmd) {
+          if (!token || busy) return;
+          setBusy(true); setResult(null);
+          try {
+            const r = await fetch(`/api/node/${encodeURIComponent(nodeId)}/exec`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-Exec-Token": token },
+              body: JSON.stringify({ cmd, timeout_s: 15 }),
+            });
+            const raw = await r.text();
+            let body = null;
+            try { body = JSON.parse(raw); } catch {}
+            if (!r.ok) {
+              setResult({ tone: "bad", text: (body && body.error) || `HTTP ${r.status}` });
+            } else if (body && body.error) {
+              setResult({ tone: "bad", text: `error: ${body.error}${body.stderr ? ` — ${body.stderr.trim()}` : ""}` });
+            } else if (body && typeof body.exit === "number" && body.exit !== 0) {
+              setResult({ tone: "bad", text: `exit=${body.exit}${body.stderr ? ` — ${body.stderr.trim()}` : ""}` });
+            } else {
+              setResult({ tone: "ok", text: (body && (body.stdout || "").trim()) || "done" });
+            }
+          } catch (err) {
+            setResult({ tone: "bad", text: String(err && err.message || err) });
+          } finally { setBusy(false); }
+        }
+
+        function applyPowerCap() {
+          if (!supported || !selected) return;
+          const w = parseInt(customW, 10);
+          if (!Number.isFinite(w) || w < 1 || w > 1000) return;
+          runExec(cmds.setPowerCap(selected.idx, w));
+        }
+        function applyPerfLevel() {
+          if (!supported || !selected) return;
+          runExec(cmds.setPerfLevel(selected.idx, level));
+        }
+        function restoreDefaults() {
+          if (!supported || !selected) return;
+          runExec(cmds.restore(selected.idx));
+        }
+
+        const vendorLabel = vendor === "unknown" ? "unknown" : vendor.toUpperCase();
+        const capNum = selected && selected.powerCapW > 0 ? Math.round(selected.powerCapW) : 0;
+        const presetsW = capNum > 0
+          ? [Math.round(capNum * 0.5), Math.round(capNum * 0.7), Math.round(capNum * 0.85), capNum]
+          : [100, 150, 200, 250];
+        const levelOpts = [
+          { k: "low",         lbl: "Low (power save)" },
+          { k: "balanced",    lbl: "Balanced (default)" },
+          { k: "performance", lbl: "Performance" },
+          { k: "max",         lbl: "Max" },
+        ];
+        const wVal = parseInt(customW, 10);
+        const wValid = Number.isFinite(wVal) && wVal >= 1 && wVal <= 1000;
+        const inputStyle = { flex: 1, padding: "6px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface-2)", color: "var(--ink)", fontFamily: "var(--mono)", fontSize: 13 };
+
+        return (
+          <div className="nd-modal-bg" onClick={e => e.target === e.currentTarget && onClose()}>
+            <div className="nd-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 640, height: "auto" }}>
+              <div className="nd-modal-head">
+                <span className="nd-modal-title">GPU Tuning · {nodeId}</span>
+                <span className="nd-modal-warn">⚠ Per-GPU · root · UNTESTED</span>
+                <button className="nd-modal-close" onClick={onClose} title="Close (Esc)">×</button>
+              </div>
+
+              <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
+                {(gpus.length === 0 || node.gpuPlaceholder) ? (
+                  <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+                    <em>No GPU available on this node.</em>
+                    <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.5 }}>
+                      If a GPU is physically present, verify that <code>rocm-smi</code> (AMD) or <code>nvidia-smi</code> (NVIDIA) is installed and on <code>$PATH</code> for the worker. See <code>worker/src/collectors/gpu_collector.cpp</code>.
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    {gpus.length > 1 && (
+                      <div>
+                        <div style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>GPU</div>
+                        <select value={sel} onChange={e => { setSel(parseInt(e.target.value, 10) || 0); setResult(null); }}
+                          style={{ ...inputStyle, width: "100%", fontSize: 12 }}>
+                          {gpus.map(g => (
+                            <option key={g.idx} value={g.idx}>
+                              GPU {g.idx} · {g.vendor.toUpperCase()} · {Math.round(g.tempC)}°C · {Math.round(g.powerW)}W
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    {selected && (
+                      <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+                        GPU {selected.idx} · <b style={{ color: "var(--ink)" }}>{vendorLabel}</b>
+                        {" · "}<b style={{ color: "var(--ink)" }}>{Math.round(selected.tempC)}°C</b>
+                        {" · "}<b style={{ color: "var(--ink)" }}>{Math.round(selected.powerW)}W</b>
+                        {selected.powerCapW > 0 && <> / <b style={{ color: "var(--ink)" }}>{Math.round(selected.powerCapW)}W cap</b></>}
+                        {selected.clockMhz > 0 && <> · <b style={{ color: "var(--ink)" }}>{Math.round(selected.clockMhz)} MHz</b></>}
+                        {selected.memTotalMb > 0 && <> · {Math.round((selected.memUsedMb||0) / 1024)}/{Math.round(selected.memTotalMb/1024)} GiB VRAM</>}
+                        {" · "}util <b style={{ color: "var(--ink)" }}>{Math.round(selected.utilPct)}%</b>
+                      </div>
+                    )}
+
+                    {!supported && (
+                      <div style={{ fontSize: 12, padding: "10px 12px", borderRadius: 6,
+                        background: "color-mix(in oklab, var(--warn) 12%, var(--surface-2))",
+                        color: "var(--ink)", border: "1px solid color-mix(in oklab, var(--warn) 40%, var(--line))", lineHeight: 1.5 }}>
+                        <div style={{ fontWeight: 700, marginBottom: 4, color: "var(--warn)" }}>GPU tuning is not supported for this vendor.</div>
+                        Detected: <b>{vendorLabel}</b>. This card has verified command templates only for AMD (<code>rocm-smi</code>) and NVIDIA (<code>nvidia-smi</code>). Add opcodes to the <code>GPU_CMDS</code> table in <code>server/web/node.html</code> to extend.
+                      </div>
+                    )}
+
+                    {editingToken ? (
+                      <div className="nd-shell-tokenrow" style={{ margin: 0 }}>
+                        <span className="lbl">Token</span>
+                        <input type="password" value={tokenDraft} onChange={e => setTokenDraft(e.target.value)}
+                          onKeyDown={e => e.key === "Enter" && saveToken()}
+                          placeholder="exec_token from worker.conf" autoFocus />
+                        <button onClick={saveToken} disabled={!tokenDraft.trim()}>Save</button>
+                      </div>
+                    ) : (
+                      <div className="nd-shell-tokenrow" style={{ margin: 0 }}>
+                        <span className="lbl">Token</span>
+                        <span style={{ flex: 1, fontFamily: "var(--mono)", fontSize: 12, color: "var(--muted)" }}>•••••••• (session)</span>
+                        <span className="change" onClick={() => { setEditingToken(true); setTokenDraft(""); }}>[change]</span>
+                      </div>
+                    )}
+
+                    <div>
+                      <div style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>Power cap (W)</div>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                        {presetsW.map(p => (
+                          <button key={p} className="nd-freq-preset" disabled={!supported}
+                            onClick={() => setCustomW(String(p))}
+                            style={{ opacity: supported ? 1 : 0.5, cursor: supported ? "pointer" : "not-allowed" }}
+                            title={`${p} W`}>
+                            {p}W
+                          </button>
+                        ))}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <input type="number" value={customW} onChange={e => setCustomW(e.target.value)}
+                          disabled={!supported}
+                          placeholder="Watts (1–1000)" min={1} max={1000}
+                          style={{ ...inputStyle, opacity: supported ? 1 : 0.5 }} />
+                        <button className="nd-freq-btn" onClick={applyPowerCap} disabled={!supported || !token || busy || !wValid}>Apply</button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <div style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>Clock / perf level</div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <select value={level} onChange={e => setLevel(e.target.value)} disabled={!supported}
+                          style={{ ...inputStyle, fontSize: 12, opacity: supported ? 1 : 0.5 }}>
+                          {levelOpts.map(o => <option key={o.k} value={o.k}>{o.lbl}</option>)}
+                        </select>
+                        <button className="nd-freq-btn" onClick={applyPerfLevel} disabled={!supported || !token || busy}>Set</button>
+                      </div>
+                    </div>
+
+                    {result && (
+                      <div style={{ fontFamily: "var(--mono)", fontSize: 12, padding: "6px 10px", borderRadius: 6,
+                        background: result.tone === "bad" ? "color-mix(in oklab, var(--crit) 12%, var(--surface-2))" : "color-mix(in oklab, var(--ok) 10%, var(--surface-2))",
+                        color: result.tone === "bad" ? "var(--crit)" : "var(--ink)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                        {result.text}
+                      </div>
+                    )}
+
+                    {supported && (
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--line)", paddingTop: 10 }}>
+                        <span onClick={busy ? undefined : restoreDefaults}
+                          style={{ fontSize: 11, color: busy ? "var(--muted)" : "var(--accent)", cursor: busy ? "default" : "pointer", textDecoration: "underline", textDecorationStyle: "dotted" }}>
+                          Restore (reset cap + perf to default)
+                        </span>
+                        <span style={{ fontSize: 10, color: "var(--muted)" }}>{busy ? "running…" : ""}</span>
+                      </div>
+                    )}
+
+                    <div style={{ fontSize: 10, padding: "6px 10px", borderRadius: 6,
+                      background: "color-mix(in oklab, var(--warn) 8%, var(--surface-2))",
+                      color: "var(--muted)", border: "1px dashed color-mix(in oklab, var(--warn) 30%, var(--line))", lineHeight: 1.5 }}>
+                      ⚠ GPU tuning commands are <b>untested</b> on this build. Sanity-check the generated output in the result pane before relying on it. Grep <code>UNTESTED</code> in the source to audit.
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
       function NodeDetailPage() {
         const params = new URLSearchParams(window.location.search);
         const nodeId = params.get("node") || "";
@@ -839,6 +1093,7 @@
         const [shellOpen, setShellOpen] = useState(false);
         const [freqOpen, setFreqOpen] = useState(false);
         const [fanOpen, setFanOpen] = useState(false);
+        const [gpuOpen, setGpuOpen] = useState(false);
         const now = useClock();
         const thr = useMemo(readThresholdsFromSettings, []);
 
@@ -873,6 +1128,7 @@
         const powTone  = tone(node.power, thr.nodePowerWarn, thr.nodePowerHot);
         const fanRatio = node.fanTotal > 0 ? node.fanOk / node.fanTotal : 1;
         const fanTone  = fanRatio < 0.75 ? "crit" : fanRatio < 1 ? "warn" : "";
+        const gpuTempTone = tone(node.gpuTempMax || 0, thr.tempWarn, thr.tempCrit);
         const isOffline = node.age >= thr.ageStale;
         const colorFor = t => t === "crit" ? "var(--crit)" : t === "warn" ? "var(--warn)" : "var(--ok)";
 
@@ -892,7 +1148,7 @@
           {label:"Emergency Shell", icon:"›_", color:"var(--warn)",   desc:"Run a shell command on this node", onClick:() => setShellOpen(true)},
           {label:"CPU Frequency",   icon:"◱", color:"var(--accent)", desc:"Clamp CPU clock speed", onClick:() => setFreqOpen(true)},
           {label:"Fan Control",     icon:"✲", color:"var(--accent)", desc:"Override fan speed", onClick:() => setFanOpen(true)},
-          {label:"Reset BMC",       icon:"⟳", color:"var(--accent)", desc:"Restart baseboard controller"},
+          {label:"GPU Tuning",      icon:"⚡", color:"var(--accent)", desc:"Power cap & clocks per GPU", onClick:() => setGpuOpen(true)},
           {label:"Run Diagnostics", icon:"⚙", color:"var(--ok)",     desc:"Self-test & health check"},
           {label:"Export Logs",     icon:"↓", color:"var(--accent)", desc:"Download last 24h logs"},
           {label:"Set Maintenance", icon:"🔧", color:"var(--warn)",  desc:"Mark node as under maintenance"},
@@ -972,6 +1228,25 @@
                 <div className="nd-kpi-bar"><div className="nd-kpi-bar-fill" style={{ width:`${Math.min(100,(node.power/thr.nodePowerHot)*100)}%`, background: colorFor(powTone) }} /></div>
                 <div className="nd-kpi-sub">Warn {thr.nodePowerWarn}W · Crit {thr.nodePowerHot}W</div>
               </div>
+              {node.gpuCount > 0 && (
+                <div className={`nd-kpi ${node.gpuPlaceholder ? "" : gpuTempTone}`}>
+                  <div className="nd-kpi-label">GPU</div>
+                  {node.gpuPlaceholder ? (
+                    <>
+                      <div className="nd-kpi-val" style={{ fontSize: 16, color: "var(--muted)", fontWeight: 700 }}>No GPU</div>
+                      <div className="nd-kpi-sub">not detected on this node</div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="nd-kpi-val">{Math.round(node.gpuTempMax)}<span className="u">°C</span></div>
+                      <div className="nd-kpi-bar"><div className="nd-kpi-bar-fill" style={{ width: `${Math.min(100, node.gpuTempMax)}%`, background: colorFor(gpuTempTone) }} /></div>
+                      <div className="nd-kpi-sub">
+                        {node.gpuCount}× {node.gpuVendor} · {Math.round(node.gpuPowerSumW)}W · {Math.round(node.gpuUtilAvgPct)}%
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="nd-body">
@@ -1144,6 +1419,59 @@
                 </div>
               </div>
 
+              {node.gpuCount > 0 && node.gpuPlaceholder && (
+                <div className="nd-card full">
+                  <h3>GPUs</h3>
+                  <div style={{ padding: "14px 16px", borderRadius: 8, background: "var(--surface-2)", border: "1px dashed var(--line)", color: "var(--muted)", fontSize: 13, lineHeight: 1.5 }}>
+                    <div style={{ fontWeight: 700, color: "var(--ink)", marginBottom: 4 }}>No GPU available on this node.</div>
+                    This card is rendered as a placeholder for UI tuning. Once a GPU is detected by the worker (AMD <code>rocm-smi</code> or NVIDIA <code>nvidia-smi</code>), per-GPU stats will appear here. Disable via <code>?fakegpu=0</code> or set <code>FAKE_GPU_DEFAULT_COUNT = 0</code> in <code>live-data.js</code>.
+                  </div>
+                </div>
+              )}
+              {node.gpuCount > 0 && !node.gpuPlaceholder && (
+                <div className="nd-card full">
+                  <h3>GPUs</h3>
+                  <div style={{ display:"flex", gap:16, marginBottom:14, flexWrap:"wrap" }}>
+                    {[
+                      { label:"Count",        val: node.gpuCount },
+                      { label:"Vendor",       val: (node.gpuVendor || "unknown").toUpperCase() },
+                      { label:"Max temp",     val: `${Math.round(node.gpuTempMax)}°C` },
+                      { label:"Total power",  val: `${Math.round(node.gpuPowerSumW)}W` },
+                      { label:"Avg util",     val: `${Math.round(node.gpuUtilAvgPct)}%` },
+                    ].map(s => (
+                      <div key={s.label} style={{ flex:1, minWidth:80, padding:"8px 12px", borderRadius:8, background:"var(--surface-2)", border:"1px solid var(--line)" }}>
+                        <div style={{ fontSize:9, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", fontWeight:700 }}>{s.label}</div>
+                        <div style={{ fontSize:18, fontWeight:800, color:"var(--ink)", fontVariantNumeric:"tabular-nums" }}>{s.val}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ overflowX:"auto" }}>
+                    <table className="nd-metrics-table">
+                      <thead>
+                        <tr>
+                          <th>#</th><th>Vendor</th><th>Temp</th><th>Util</th>
+                          <th>Power</th><th>Cap</th><th>VRAM</th><th>Clock</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(node.gpus || []).map(g => (
+                          <tr key={g.idx}>
+                            <td><span className="nd-module-badge">GPU{g.idx}</span></td>
+                            <td><span className="nd-metric-name">{(g.vendor || "unknown").toUpperCase()}</span></td>
+                            <td><span className="nd-metric-val">{g.tempC > 0 ? Math.round(g.tempC) : "—"}</span> <span className="nd-metric-unit">{g.tempC > 0 ? "°C" : ""}</span></td>
+                            <td><span className="nd-metric-val">{g.utilPct > 0 ? Math.round(g.utilPct) : "—"}</span> <span className="nd-metric-unit">{g.utilPct > 0 ? "%" : ""}</span></td>
+                            <td><span className="nd-metric-val">{g.powerW > 0 ? Math.round(g.powerW) : "—"}</span> <span className="nd-metric-unit">{g.powerW > 0 ? "W" : ""}</span></td>
+                            <td><span className="nd-metric-val">{g.powerCapW > 0 ? Math.round(g.powerCapW) : "—"}</span> <span className="nd-metric-unit">{g.powerCapW > 0 ? "W" : ""}</span></td>
+                            <td><span className="nd-metric-val">{g.memTotalMb > 0 ? `${Math.round((g.memUsedMb||0)/1024)}/${Math.round(g.memTotalMb/1024)}` : "—"}</span> <span className="nd-metric-unit">{g.memTotalMb > 0 ? "GiB" : ""}</span></td>
+                            <td><span className="nd-metric-val">{g.clockMhz > 0 ? Math.round(g.clockMhz) : "—"}</span> <span className="nd-metric-unit">{g.clockMhz > 0 ? "MHz" : ""}</span></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               <div className="nd-card full">
                 <h3>Control Panel</h3>
                 <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
@@ -1207,6 +1535,7 @@
             {shellOpen && <ShellModal nodeId={node.id} onClose={() => setShellOpen(false)} />}
             {freqOpen && <FreqModal nodeId={node.id} node={node} onClose={() => setFreqOpen(false)} />}
             {fanOpen && <FanModal nodeId={node.id} node={node} onClose={() => setFanOpen(false)} />}
+            {gpuOpen && <GpuModal nodeId={node.id} node={node} onClose={() => setGpuOpen(false)} />}
           </div>
         );
       }

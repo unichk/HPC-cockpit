@@ -9,6 +9,7 @@ CollectorPtr CreateLoadCollector();
 CollectorPtr CreateThermalCollector();
 CollectorPtr CreatePowerCollector();
 CollectorPtr CreateFanCollector();
+CollectorPtr CreateGpuCollector();
 
 CollectorPtr CreateCollector(const std::string& name) {
   if (name == "cpu") {
@@ -29,9 +30,12 @@ CollectorPtr CreateCollector(const std::string& name) {
   if (name == "fan") {
     return CreateFanCollector();
   }
+  if (name == "gpu") {
+    return CreateGpuCollector();
+  }
   return nullptr;
 }
 
 std::vector<std::string> BuiltinCollectors() {
-  return {"cpu", "memory", "load", "thermal", "power", "fan"};
+  return {"cpu", "memory", "load", "thermal", "power", "fan", "gpu"};
 }

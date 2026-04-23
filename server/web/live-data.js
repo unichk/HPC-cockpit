@@ -16,6 +16,62 @@ function fanVendorName(code) {
   return (c > 0 && c < FAN_VENDOR_NAMES.length) ? FAN_VENDOR_NAMES[c] : "unknown";
 }
 
+// GPU vendor encoding must mirror gpu_collector.cpp's GpuVendor enum.
+// NOTE: UNTESTED — worker-side collector has not been exercised against a
+// real GPU machine yet. See gpu_collector.cpp for details.
+const GPU_VENDOR_NAMES = [null, "amd", "nvidia", "mixed"];
+const GPU_MAX = 8;
+
+function gpuVendorName(code) {
+  const c = code | 0;
+  return (c > 0 && c < GPU_VENDOR_NAMES.length) ? GPU_VENDOR_NAMES[c] : "unknown";
+}
+
+// UI-tuning placeholder: when the dev cluster has no GPU, synthesize fake
+// per-node GPU data so the KPI tile, detail card and modal are visible.
+// Turn off (set to 0) before shipping to the competition cluster.
+//
+// Override options:
+//   - URL query param:   ?fakegpu=0   disables for one page load
+//   - URL query param:   ?fakegpu=4   forces 4 fake GPUs
+//   - sessionStorage:    cockpit_fake_gpu = "0" / "2" / "4" etc.
+const FAKE_GPU_DEFAULT_COUNT = 2;
+const FAKE_GPU_VENDOR = "amd";  // "amd" | "nvidia"
+
+function fakeGpuCount() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const q = params.get("fakegpu");
+    if (q !== null) return Math.max(0, Math.min(GPU_MAX, parseInt(q, 10) || 0));
+    const s = sessionStorage.getItem("cockpit_fake_gpu");
+    if (s !== null) return Math.max(0, Math.min(GPU_MAX, parseInt(s, 10) || 0));
+  } catch {}
+  return FAKE_GPU_DEFAULT_COUNT;
+}
+
+// Build empty GPU slots (all zero / unknown vendor) so the UI renders its
+// "—" placeholder fallbacks. No fake numbers — this is only to make the
+// visual shape of the card visible on a GPU-less dev box.
+function placeholderGpus(n) {
+  const gpus = [];
+  for (let i = 0; i < n; i++) {
+    gpus.push({
+      idx: i,
+      vendor: "unknown",
+      tempC: 0, utilPct: 0, powerW: 0, powerCapW: 0,
+      memUsedMb: 0, memTotalMb: 0, clockMhz: 0,
+    });
+  }
+  return {
+    gpus,
+    gpuCount: n,
+    gpuVendor: "unknown",
+    gpuTempMax: 0,
+    gpuPowerSumW: 0,
+    gpuUtilAvgPct: 0,
+  };
+}
+
 function governorName(code) {
   const c = code | 0;
   return (c > 0 && c < GOVERNOR_NAMES.length) ? GOVERNOR_NAMES[c] : "";
@@ -178,6 +234,43 @@ function mapNode(raw, nowMs) {
   const fanRpm = pickNum(idx, "fan.avg_rpm");
   const fanVendorCode = pickNum(idx, "fan.vendor_code");
 
+  let gpuCount = pickNum(idx, "gpu.count") | 0;
+  let gpuVendor = gpuVendorName(pickNum(idx, "gpu.vendor_code"));
+  let gpuPlaceholder = false;
+  let gpuTempMax = pickNum(idx, "gpu.temp_max_c");
+  let gpuPowerSumW = pickNum(idx, "gpu.power_sum_w");
+  let gpuUtilAvgPct = pickNum(idx, "gpu.util_avg_percent");
+  let gpus = [];
+  for (let i = 0; i < Math.min(gpuCount, GPU_MAX); i++) {
+    gpus.push({
+      idx: i,
+      vendor: gpuVendorName(pickNum(idx, `gpu.${i}.vendor_code`)),
+      tempC: pickNum(idx, `gpu.${i}.temp_c`),
+      utilPct: pickNum(idx, `gpu.${i}.util_percent`),
+      powerW: pickNum(idx, `gpu.${i}.power_w`),
+      powerCapW: pickNum(idx, `gpu.${i}.power_cap_w`),
+      memUsedMb: pickNum(idx, `gpu.${i}.mem_used_mb`),
+      memTotalMb: pickNum(idx, `gpu.${i}.mem_total_mb`),
+      clockMhz: pickNum(idx, `gpu.${i}.clock_mhz`),
+    });
+  }
+
+  // UI-tuning injection: only kick in when the worker reports no GPU, so a
+  // real GPU host is never touched.
+  if (gpuCount === 0) {
+    const fakeN = fakeGpuCount();
+    if (fakeN > 0) {
+      const fake = placeholderGpus(fakeN);
+      gpus = fake.gpus;
+      gpuCount = fake.gpuCount;
+      gpuVendor = fake.gpuVendor;
+      gpuTempMax = fake.gpuTempMax;
+      gpuPowerSumW = fake.gpuPowerSumW;
+      gpuUtilAvgPct = fake.gpuUtilAvgPct;
+      gpuPlaceholder = true;
+    }
+  }
+
   const load = [
     pickNum(idx, "load.avg1"),
     pickNum(idx, "load.avg5"),
@@ -220,6 +313,13 @@ function mapNode(raw, nowMs) {
     fanRpm,
     fanVendor: fanVendorName(fanVendorCode),
     perFan: perFanRpms(raw.metrics),
+    gpuCount,
+    gpuVendor,
+    gpus,
+    gpuTempMax,
+    gpuPowerSumW,
+    gpuUtilAvgPct,
+    gpuPlaceholder,
     extraThermal: {
       nvmeMax: pickNum(idx, "thermal.nvme_max_c"),
       nicMax: pickNum(idx, "thermal.nic_max_c"),

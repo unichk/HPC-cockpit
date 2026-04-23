@@ -19,6 +19,7 @@ function NodeRow({ node, thresholds, visible, onSelect }) {
   const fanRatio = node.fanTotal > 0 ? node.fanOk / node.fanTotal : 1;
   const fanTone = fanRatio < 1 ? (fanRatio < 0.75 ? "crit" : "warn") : "";
   const loadTone = node.load[0] > 20 ? "crit" : node.load[0] > 10 ? "warn" : "";
+  const gpuTempTone = classForValue(node.gpuTempMax || 0, thresholds.tempWarn, thresholds.tempCrit);
 
   const ageTone =
     node.age >= thresholds.ageStale ? "crit" :
@@ -42,7 +43,13 @@ function NodeRow({ node, thresholds, visible, onSelect }) {
         </span>
       </div>
 
-      <div className="metrics" style={{ columnGap: 24 }}>
+      <div className="metrics" style={{
+        columnGap: 24,
+        paddingLeft: 28,
+        gridTemplateColumns: node.gpuCount > 0
+          ? "auto auto auto auto auto auto auto"
+          : "auto auto auto auto auto auto",
+      }}>
         {visible.cpu && (
           <div className={`metric ${cpuTone}`}>
             <span className="metric-label">CPU</span>
@@ -52,15 +59,19 @@ function NodeRow({ node, thresholds, visible, onSelect }) {
         {visible.mem && (
           <div className={`metric ${memTone}`}>
             <span className="metric-label">Memory</span>
-            <div className="metric-value">{node.memG.toFixed(0)}<span className="unit">/{node.memTotal}G · {node.memPct.toFixed(0)}%</span></div>
-            <div className="bar-track"><div className="bar-fill mem" style={{ width: `${Math.min(100, node.memPct)}%` }} /></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, width: "fit-content" }}>
+              <div className="metric-value">{node.memG.toFixed(0)}<span className="unit">/{node.memTotal}G · {node.memPct.toFixed(0)}%</span></div>
+              <div className="bar-track"><div className="bar-fill mem" style={{ width: `${Math.min(100, node.memPct)}%` }} /></div>
+            </div>
           </div>
         )}
         {visible.swap && (
           <div className={`metric ${swapTone}`}>
             <span className="metric-label">Swap</span>
-            <div className="metric-value">{node.swapG.toFixed(1)}<span className="unit">/{node.swapTotal}G · {node.swapPct.toFixed(0)}%</span></div>
-            <div className="bar-track"><div className="bar-fill swap" style={{ width: `${Math.min(100, node.swapPct)}%` }} /></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, width: "fit-content" }}>
+              <div className="metric-value">{node.swapG.toFixed(1)}<span className="unit">/{node.swapTotal}G · {node.swapPct.toFixed(0)}%</span></div>
+              <div className="bar-track"><div className="bar-fill swap" style={{ width: `${Math.min(100, node.swapPct)}%` }} /></div>
+            </div>
           </div>
         )}
         {visible.load && (
@@ -92,6 +103,16 @@ function NodeRow({ node, thresholds, visible, onSelect }) {
             <div className="metric-value fan-state">
               <window.FanIcon />
               {(node.fanRpm / 1000).toFixed(1)}<span className="unit">k · {node.fanOk}/{node.fanTotal}</span>
+            </div>
+          </div>
+        )}
+        {node.gpuCount > 0 && (
+          <div className={`metric ${gpuTempTone}`}>
+            <span className="metric-label">GPU</span>
+            <div className="metric-value" style={node.gpuPlaceholder ? { fontSize: 12, color: "var(--muted)", fontWeight: 600 } : undefined}>
+              {node.gpuPlaceholder
+                ? <span>NO GPU</span>
+                : <>{node.gpuCount}×<span className="unit">{" · "}{Math.round(node.gpuTempMax)}°C</span></>}
             </div>
           </div>
         )}
