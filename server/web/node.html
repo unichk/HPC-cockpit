@@ -123,7 +123,7 @@
     <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
-    <script src="live-data.js?v=6"></script>
+    <script src="live-data.js?v=7"></script>
     <script type="text/babel">
       const { useState, useEffect, useMemo } = React;
       const THR = window.DEFAULT_THRESHOLDS;
@@ -619,6 +619,291 @@
         );
       }
 
+      // Parse "0-7,16,18-19" into a Set of integers.
+      function parseCoreList(text, max) {
+        const out = new Set();
+        const parts = String(text || "").split(",").map(s => s.trim()).filter(Boolean);
+        for (const p of parts) {
+          const m = p.match(/^(\d+)(?:-(\d+))?$/);
+          if (!m) return null;
+          const lo = parseInt(m[1], 10);
+          const hi = m[2] != null ? parseInt(m[2], 10) : lo;
+          if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo > hi) return null;
+          for (let i = lo; i <= hi && i < max; i++) out.add(i);
+        }
+        return out;
+      }
+
+      function CoreToggleModal({ nodeId, node, onClose }) {
+        const [token, setToken] = useState(() => sessionStorage.getItem("cockpit_exec_token") || "");
+        const [tokenDraft, setTokenDraft] = useState("");
+        const [editingToken, setEditingToken] = useState(() => !sessionStorage.getItem("cockpit_exec_token"));
+        // states: { [idx]: 0 | 1 }. Loaded from the host on mount; "desired"
+        // is what the operator has staged. Apply diff sends one composite cmd.
+        const totalGuess = node.cpuCoreCount > 0 ? node.cpuCoreCount : 0;
+        const [hostState, setHostState] = useState(null); // null until loaded
+        const [desired, setDesired] = useState(null);
+        const [busy, setBusy] = useState(false);
+        const [result, setResult] = useState(null);
+        const [customRange, setCustomRange] = useState("");
+
+        useEffect(() => {
+          const onKey = (e) => { if (e.key === "Escape") onClose(); };
+          window.addEventListener("keydown", onKey);
+          return () => window.removeEventListener("keydown", onKey);
+        }, [onClose]);
+
+        function saveToken() {
+          const t = tokenDraft.trim();
+          if (!t) return;
+          sessionStorage.setItem("cockpit_exec_token", t);
+          setToken(t); setTokenDraft(""); setEditingToken(false);
+        }
+
+        async function runExec(cmd, timeout_s = 15) {
+          if (!token || busy) return null;
+          setBusy(true); setResult(null);
+          try {
+            const r = await fetch(`/api/node/${encodeURIComponent(nodeId)}/exec`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-Exec-Token": token },
+              body: JSON.stringify({ cmd, timeout_s }),
+            });
+            const raw = await r.text();
+            let body = null;
+            try { body = JSON.parse(raw); } catch {}
+            if (!r.ok) {
+              setResult({ tone: "bad", text: (body && body.error) || `HTTP ${r.status}` });
+              return null;
+            }
+            if (body && body.error) {
+              setResult({ tone: "bad", text: `error: ${body.error}${body.stderr ? ` — ${body.stderr.trim()}` : ""}` });
+              return null;
+            }
+            if (body && typeof body.exit === "number" && body.exit !== 0) {
+              setResult({ tone: "bad", text: `exit=${body.exit}${body.stderr ? ` — ${body.stderr.trim()}` : ""}` });
+              return null;
+            }
+            return (body && body.stdout) || "";
+          } catch (err) {
+            setResult({ tone: "bad", text: String(err && err.message || err) });
+            return null;
+          } finally {
+            setBusy(false);
+          }
+        }
+
+        async function loadState() {
+          // List every cpuN dir, read its `online` (cpu0 has none → treat as 1).
+          const cmd =
+            `for d in /sys/devices/system/cpu/cpu[0-9]*; do\n` +
+            `  n=\${d##*/cpu}; s=$(cat "$d/online" 2>/dev/null || echo 1); echo "$n:$s";\n` +
+            `done`;
+          const stdout = await runExec(cmd);
+          if (stdout == null) return;
+          const map = {};
+          for (const line of stdout.split("\n")) {
+            const m = line.trim().match(/^(\d+):([01])$/);
+            if (!m) continue;
+            map[parseInt(m[1], 10)] = parseInt(m[2], 10);
+          }
+          setHostState(map);
+          setDesired({ ...map });
+          setResult({ tone: "ok", text: `loaded ${Object.keys(map).length} cores` });
+        }
+
+        // Auto-load once a token is available.
+        useEffect(() => {
+          if (token && hostState === null && !busy) loadState();
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [token]);
+
+        const cores = desired ? Object.keys(desired).map(n => parseInt(n, 10)).sort((a, b) => a - b)
+                              : (totalGuess > 0 ? Array.from({ length: totalGuess }, (_, i) => i) : []);
+        const onlineCount = desired ? Object.values(desired).filter(v => v === 1).length : 0;
+        const totalCount = cores.length;
+
+        const diffs = [];
+        if (desired && hostState) {
+          for (const n of cores) {
+            const want = desired[n];
+            const have = hostState[n];
+            if (want !== have) diffs.push({ n, want });
+          }
+        }
+
+        function toggleCore(n) {
+          if (n === 0) return; // cpu0 cannot be offlined
+          if (!desired) return;
+          setDesired({ ...desired, [n]: desired[n] === 1 ? 0 : 1 });
+        }
+
+        function setAllOn() {
+          if (!desired) return;
+          const next = {};
+          for (const n of cores) next[n] = 1;
+          setDesired(next);
+        }
+
+        function setHalfOn() {
+          if (!desired) return;
+          const half = Math.max(1, Math.floor(totalCount / 2));
+          const next = {};
+          for (const n of cores) next[n] = (n < half) ? 1 : 0;
+          next[0] = 1;
+          setDesired(next);
+        }
+
+        function applyCustom() {
+          if (!desired) return;
+          const set = parseCoreList(customRange, totalCount);
+          if (!set) {
+            setResult({ tone: "bad", text: `bad range: "${customRange}"` });
+            return;
+          }
+          set.add(0);
+          const next = {};
+          for (const n of cores) next[n] = set.has(n) ? 1 : 0;
+          setDesired(next);
+        }
+
+        async function applyChanges() {
+          if (diffs.length === 0) return;
+          // Compose a single shell command chaining each write. cpu0 is never
+          // touched (toggleCore guards it), so no need to special-case here.
+          const lines = diffs.map(d => `echo ${d.want} > /sys/devices/system/cpu/cpu${d.n}/online`);
+          const cmd = `set -e\n${lines.join("\n")}\necho "applied ${diffs.length}"`;
+          const stdout = await runExec(cmd, 30);
+          if (stdout == null) return;
+          setResult({ tone: "ok", text: stdout.trim() || `applied ${diffs.length}` });
+          await loadState();
+        }
+
+        async function restoreAll() {
+          const cmd =
+            `for d in /sys/devices/system/cpu/cpu[0-9]*; do\n` +
+            `  echo 1 > "$d/online" 2>/dev/null || true;\n` +
+            `done\necho "all-on"`;
+          const stdout = await runExec(cmd, 30);
+          if (stdout == null) return;
+          setResult({ tone: "ok", text: stdout.trim() || "all-on" });
+          await loadState();
+        }
+
+        const chipCore = (n) => {
+          const isOn = desired ? desired[n] === 1 : false;
+          const changed = hostState && desired && hostState[n] !== desired[n];
+          const locked = n === 0;
+          return (
+            <button
+              key={n}
+              onClick={() => toggleCore(n)}
+              disabled={locked || busy || !desired}
+              title={locked ? "cpu0 cannot be offlined" : `cpu${n} · click to toggle`}
+              style={{
+                fontFamily: "var(--mono)",
+                fontSize: 11,
+                padding: "5px 7px",
+                minWidth: 38,
+                borderRadius: 5,
+                border: `1px solid ${changed ? "var(--accent)" : "var(--line)"}`,
+                background: isOn
+                  ? (changed ? "color-mix(in oklab, var(--ok) 30%, var(--surface-2))" : "color-mix(in oklab, var(--ok) 18%, var(--surface-2))")
+                  : (changed ? "color-mix(in oklab, var(--warn) 25%, var(--surface-2))" : "var(--surface-2)"),
+                color: isOn ? "var(--ink)" : "var(--muted)",
+                cursor: locked || busy ? "default" : "pointer",
+                opacity: locked ? 0.7 : 1,
+                fontWeight: 600,
+              }}>
+              {n}{locked ? "🔒" : ""}
+            </button>
+          );
+        };
+
+        return (
+          <div className="nd-modal-bg" onClick={e => e.target === e.currentTarget && onClose()}>
+            <div className="nd-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 720, height: "auto" }}>
+              <div className="nd-modal-head">
+                <span className="nd-modal-title">CPU Cores · {nodeId}</span>
+                <span className="nd-modal-warn">⚠ Hot-unplug · root</span>
+                <button className="nd-modal-close" onClick={onClose} title="Close (Esc)">×</button>
+              </div>
+
+              <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
+                <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+                  {totalCount > 0
+                    ? <>Online <b style={{ color: "var(--ink)" }}>{onlineCount}</b> / {totalCount}{diffs.length > 0 && <> · <b style={{ color: "var(--accent)" }}>{diffs.length} pending</b></>}</>
+                    : <em>core data unavailable on this node</em>}
+                </div>
+
+                {editingToken ? (
+                  <div className="nd-shell-tokenrow" style={{ margin: 0 }}>
+                    <span className="lbl">Token</span>
+                    <input type="password" value={tokenDraft} onChange={e => setTokenDraft(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && saveToken()}
+                      placeholder="exec_token from worker.conf" autoFocus />
+                    <button onClick={saveToken} disabled={!tokenDraft.trim()}>Save</button>
+                  </div>
+                ) : (
+                  <div className="nd-shell-tokenrow" style={{ margin: 0 }}>
+                    <span className="lbl">Token</span>
+                    <span style={{ flex: 1, fontFamily: "var(--mono)", fontSize: 12, color: "var(--muted)" }}>•••••••• (session)</span>
+                    <span className="change" onClick={() => { setEditingToken(true); setTokenDraft(""); }}>[change]</span>
+                  </div>
+                )}
+
+                <div>
+                  <div style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>Cores</div>
+                  {!desired ? (
+                    <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+                      {token ? (busy ? "loading…" : <span onClick={loadState} style={{ cursor: "pointer", color: "var(--accent)", textDecoration: "underline", textDecorationStyle: "dotted" }}>load core states</span>)
+                             : "set token to load core states"}
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                      {cores.map(chipCore)}
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>Presets</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                    <button className="nd-freq-preset" onClick={setAllOn} disabled={!desired || busy}>All on</button>
+                    <button className="nd-freq-preset" onClick={setHalfOn} disabled={!desired || busy} title="cpu0..cpu(N/2-1) on, rest off">First half</button>
+                    <button className="nd-freq-preset" onClick={() => loadState()} disabled={!token || busy}>Refresh</button>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <input type="text" value={customRange} onChange={e => setCustomRange(e.target.value)}
+                      placeholder="online cores: 0-7,16,18"
+                      style={{ flex: 1, padding: "6px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface-2)", color: "var(--ink)", fontFamily: "var(--mono)", fontSize: 13 }} />
+                    <button className="nd-freq-btn" onClick={applyCustom} disabled={!desired || busy || !customRange.trim()}>Stage</button>
+                  </div>
+                </div>
+
+                {result && (
+                  <div style={{ fontFamily: "var(--mono)", fontSize: 12, padding: "6px 10px", borderRadius: 6,
+                    background: result.tone === "bad" ? "color-mix(in oklab, var(--crit) 12%, var(--surface-2))" : "color-mix(in oklab, var(--ok) 10%, var(--surface-2))",
+                    color: result.tone === "bad" ? "var(--crit)" : "var(--ink)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    {result.text}
+                  </div>
+                )}
+
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--line)", paddingTop: 10 }}>
+                  <span onClick={busy ? undefined : restoreAll}
+                    style={{ fontSize: 11, color: busy ? "var(--muted)" : "var(--accent)", cursor: busy ? "default" : "pointer", textDecoration: "underline", textDecorationStyle: "dotted" }}>
+                    Restore (online every core)
+                  </span>
+                  <button className="nd-freq-btn" onClick={applyChanges} disabled={busy || diffs.length === 0}>
+                    {busy ? "running…" : `Apply ${diffs.length} change${diffs.length === 1 ? "" : "s"}`}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
       // Per-vendor IPMI OEM fan commands. Each entry returns a shell command
       // string for the exec channel. Vendors absent from this table trigger
       // the "not supported" banner in FanModal; no command is sent.
@@ -1094,6 +1379,7 @@
         const [freqOpen, setFreqOpen] = useState(false);
         const [fanOpen, setFanOpen] = useState(false);
         const [gpuOpen, setGpuOpen] = useState(false);
+        const [coresOpen, setCoresOpen] = useState(false);
         const now = useClock();
         const thr = useMemo(readThresholdsFromSettings, []);
 
@@ -1149,6 +1435,7 @@
           {label:"CPU Frequency",   icon:"◱", color:"var(--accent)", desc:"Clamp CPU clock speed", onClick:() => setFreqOpen(true)},
           {label:"Fan Control",     icon:"✲", color:"var(--accent)", desc:"Override fan speed", onClick:() => setFanOpen(true)},
           {label:"GPU Tuning",      icon:"⚡", color:"var(--accent)", desc:"Power cap & clocks per GPU", onClick:() => setGpuOpen(true)},
+          {label:"CPU Cores",       icon:"⊞", color:"var(--accent)", desc:"Online/offline individual cores", onClick:() => setCoresOpen(true)},
         ];
 
         return (
@@ -1182,8 +1469,10 @@
                 <div className="nd-kpi-bar"><div className="nd-kpi-bar-fill" style={{ width: `${node.cpu}%`, background: colorFor(cpuTone) }} /></div>
                 <div className="nd-kpi-sub">
                   {node.cpuFreqMhz > 0
-                    ? `${formatMhz(node.cpuFreqMhz)}${node.cpuGovernor ? ` · ${node.cpuGovernor}` : ""}`
-                    : `Warn ${thr.cpuWarn}% · Crit ${thr.cpuHot}%`}
+                    ? `${formatMhz(node.cpuFreqMhz)}${node.cpuGovernor ? ` · ${node.cpuGovernor}` : ""}${node.cpuCoreCount > 0 ? ` · ${node.cpuCoresOnline}/${node.cpuCoreCount} cores` : ""}`
+                    : (node.cpuCoreCount > 0
+                        ? `${node.cpuCoresOnline}/${node.cpuCoreCount} cores online`
+                        : `Warn ${thr.cpuWarn}% · Crit ${thr.cpuHot}%`)}
                 </div>
               </div>
               <div className={`nd-kpi ${memTone}`}>
@@ -1529,6 +1818,7 @@
             {freqOpen && <FreqModal nodeId={node.id} node={node} onClose={() => setFreqOpen(false)} />}
             {fanOpen && <FanModal nodeId={node.id} node={node} onClose={() => setFanOpen(false)} />}
             {gpuOpen && <GpuModal nodeId={node.id} node={node} onClose={() => setGpuOpen(false)} />}
+            {coresOpen && <CoreToggleModal nodeId={node.id} node={node} onClose={() => setCoresOpen(false)} />}
           </div>
         );
       }

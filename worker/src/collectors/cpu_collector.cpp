@@ -1,5 +1,8 @@
 #include "collector.h"
 
+#include <dirent.h>
+
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -74,6 +77,43 @@ void CollectCpufreq(std::vector<Metric>& out) {
   }
 }
 
+// Walk /sys/devices/system/cpu/ once to count total logical CPUs (cpuN dirs)
+// and how many are currently online. cpu0 has no `online` file on most kernels
+// — it's always online, so absence counts as 1.
+void CollectCores(std::vector<Metric>& out) {
+  DIR* dir = opendir("/sys/devices/system/cpu");
+  if (!dir) return;
+
+  int total = 0;
+  int online = 0;
+  struct dirent* ent;
+  while ((ent = readdir(dir)) != nullptr) {
+    const std::string name = ent->d_name;
+    if (name.size() < 4 || name.compare(0, 3, "cpu") != 0) continue;
+    bool all_digits = true;
+    for (size_t i = 3; i < name.size(); ++i) {
+      if (!std::isdigit(static_cast<unsigned char>(name[i]))) {
+        all_digits = false;
+        break;
+      }
+    }
+    if (!all_digits) continue;
+
+    ++total;
+    long online_val = 1;
+    if (!ReadSysfsLong("/sys/devices/system/cpu/" + name + "/online", online_val)) {
+      online_val = 1;
+    }
+    if (online_val == 1) ++online;
+  }
+  closedir(dir);
+
+  if (total > 0) {
+    out.push_back(Metric{"cpu", "core_count", static_cast<double>(total), "count"});
+    out.push_back(Metric{"cpu", "cores_online", static_cast<double>(online), "count"});
+  }
+}
+
 class CpuCollector : public Collector {
  public:
   std::string Name() const override { return "cpu"; }
@@ -107,6 +147,7 @@ class CpuCollector : public Collector {
 
     // cpufreq state is independent of the prev-sample usage calc, always emit.
     CollectCpufreq(out);
+    CollectCores(out);
 
     if (!has_prev_) {
       prev_total_ = total;

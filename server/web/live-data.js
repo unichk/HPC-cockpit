@@ -216,6 +216,8 @@ function mapNode(raw, nowMs) {
   const cpuFreqMaxKhz = pickNum(idx, "cpu.freq_max_khz");
   const cpuGovernorCode = pickNum(idx, "cpu.governor_code");
   const cpuGovernorsMask = pickNum(idx, "cpu.governors_mask");
+  const cpuCoreCount = pickNum(idx, "cpu.core_count") | 0;
+  const cpuCoresOnline = pickNum(idx, "cpu.cores_online") | 0;
   const memUsedKb = pickNum(idx, "memory.used");
   const memTotalKb = pickNum(idx, "memory.total");
   const swapUsedKb = pickNum(idx, "memory.swap_used");
@@ -330,6 +332,8 @@ function mapNode(raw, nowMs) {
     cpuFreqMaxMhz: cpuFreqMaxKhz > 0 ? cpuFreqMaxKhz / 1000 : 0,
     cpuGovernor: governorName(cpuGovernorCode),
     cpuGovernorsAvailable: governorsFromMask(cpuGovernorsMask),
+    cpuCoreCount,
+    cpuCoresOnline,
     rawMetrics: raw.metrics || [],
     timestampMs: raw.timestamp_ms || 0,
     receivedAtMs: raw.received_at_ms || 0,
