@@ -5,9 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Node Detail — HPC Cockpit</title>
     <link rel="icon" type="image/png" href="assets/hpc-cockpit-icon.png" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" />
+    <link rel="stylesheet" href="vendor/fonts.css" />
     <link rel="stylesheet" href="styles.css?v=6" />
     <style>
       .nd-layout { display: grid; grid-template-rows: auto 1fr auto; min-height: 100vh; padding: 8px 10px 6px; gap: 8px; }
@@ -120,9 +118,9 @@
   </head>
   <body>
     <div id="root"></div>
-    <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
-    <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
-    <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+    <script src="vendor/react.development.js"></script>
+    <script src="vendor/react-dom.development.js"></script>
+    <script src="vendor/babel.min.js"></script>
     <script src="live-data.js?v=8"></script>
     <script type="text/babel">
       const { useState, useEffect, useMemo } = React;
