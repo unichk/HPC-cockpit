@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" />
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=6" />
   <style>
     .sch-layout { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; overflow: hidden; padding: 8px 10px 4px; gap: 8px; }
     .sch-topbar { display: flex; align-items: center; gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 7px 14px; box-shadow: var(--shadow-sm); }
@@ -29,6 +29,12 @@
     .sch-day-head { padding: 8px 6px; text-align: center; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border-left: 1px solid var(--line); }
     .sch-day-head .day-num { display: block; font-size: 18px; font-weight: 800; color: var(--ink); letter-spacing: -0.01em; margin-top: 2px; font-variant-numeric: tabular-nums; }
     .sch-day-head.today .day-num { background: var(--accent); color: #fff; border-radius: 50%; width: 30px; height: 30px; display: block; line-height: 30px; text-align: center; font-size: 15px; margin: 2px auto 0; }
+    .sch-day-head.selected { background: color-mix(in oklab, var(--accent) 10%, transparent); }
+    .sch-day-head.selected:not(.today) .day-num { color: var(--accent); }
+    .sch-day-head:hover:not(.today) { background: var(--surface-2); }
+    .sch-day-nav { flex-shrink: 0; width: 22px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-2); color: var(--muted); font-size: 13px; font-weight: 700; line-height: 1; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: all 120ms; }
+    .sch-day-nav:hover { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 30%, var(--line)); }
+    .sch-day-nav.today { color: var(--accent); font-size: 9px; }
 
     .sch-grid { display: grid; grid-template-columns: 56px repeat(7, 1fr); flex: 1; overflow-y: scroll; position: relative; padding-top: 4px; }
     .sch-grid::-webkit-scrollbar { width: 6px; }
@@ -252,6 +258,11 @@
       const [events, setEvents] = useState([]);
       const [modal, setModal] = useState(null);
       const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()));
+      // Day shown in the right-hand task list. Defaults to today; updated when
+      // the operator clicks a day header in the week grid or uses prev/next.
+      const [selectedDay, setSelectedDay] = useState(() => {
+        const d = new Date(); d.setHours(0,0,0,0); return d;
+      });
       const knownNodes = useKnownNodes();
 
       useEffect(() => {
@@ -311,12 +322,19 @@
 
       const weekLabel = `${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${days[6].toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
 
-      const todayEvents = events
+      const selectedDayEvents = events
         .filter(ev => {
-          const s = new Date(ev.startMs); s.setHours(0,0,0,0);
-          return s.getTime() === today.getTime();
+          const dayEnd = new Date(selectedDay); dayEnd.setDate(dayEnd.getDate() + 1);
+          return ev.endMs > selectedDay.getTime() && ev.startMs < dayEnd.getTime();
         })
         .sort((a, b) => a.startMs - b.startMs);
+
+      const shiftSelectedDay = (delta) => {
+        const d = new Date(selectedDay);
+        d.setDate(d.getDate() + delta);
+        setSelectedDay(d);
+      };
+      const isSelectedToday = selectedDay.getTime() === today.getTime();
 
       const slotDefaultStart = (dayStart, hour) => {
         const d = new Date(dayStart);
@@ -359,8 +377,15 @@
                 <div style={{padding:"8px 6px",fontSize:9,color:"var(--muted)",fontWeight:700,letterSpacing:"0.06em",textTransform:"uppercase"}}>TIME</div>
                 {days.map((d,i) => {
                   const isToday = d.toDateString() === today.toDateString();
+                  const isSelected = d.toDateString() === selectedDay.toDateString();
                   return (
-                    <div key={i} className={`sch-day-head ${isToday?"today":""}`}>
+                    <div
+                      key={i}
+                      className={`sch-day-head ${isToday?"today":""} ${isSelected?"selected":""}`}
+                      onClick={() => { const nd = new Date(d); nd.setHours(0,0,0,0); setSelectedDay(nd); }}
+                      style={{cursor:"pointer"}}
+                      title="Show this day in the task list"
+                    >
                       {d.toLocaleDateString("en-US",{weekday:"short"}).toUpperCase()}
                       <span className="day-num">{d.getDate()}</span>
                     </div>
@@ -414,9 +439,20 @@
             </div>
 
             <div className="sch-list">
-              <h3>Today · {today.toLocaleDateString("en-US",{month:"short",day:"numeric"})}</h3>
+              <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 0 6px",borderBottom:"1px solid var(--line)"}}>
+                <button className="sch-day-nav" onClick={() => shiftSelectedDay(-1)} title="Previous day">‹</button>
+                <h3 style={{flex:1,margin:0,textAlign:"center"}}>
+                  {isSelectedToday ? "Today" : selectedDay.toLocaleDateString("en-US",{weekday:"short"})}
+                  {" · "}
+                  {selectedDay.toLocaleDateString("en-US",{month:"short",day:"numeric"})}
+                </h3>
+                <button className="sch-day-nav" onClick={() => shiftSelectedDay(1)} title="Next day">›</button>
+                {!isSelectedToday && (
+                  <button className="sch-day-nav today" onClick={() => setSelectedDay(new Date(today))} title="Jump to today">●</button>
+                )}
+              </div>
               <div style={{overflowY:"auto",flex:1,display:"flex",flexDirection:"column",gap:6,padding:"6px 0"}}>
-                {todayEvents.map(ev => {
+                {selectedDayEvents.map(ev => {
                   const color = evtColor(ev.id);
                   return (
                     <div key={ev.id} className="sch-job-row" onClick={() => setModal({ev})} style={{borderLeft:`3px solid ${color}`}}>
@@ -433,7 +469,7 @@
                     </div>
                   );
                 })}
-                {todayEvents.length === 0 && <div style={{fontSize:11,color:"var(--muted)",padding:"4px 0"}}>No events today</div>}
+                {selectedDayEvents.length === 0 && <div style={{fontSize:11,color:"var(--muted)",padding:"4px 0"}}>No events on this day</div>}
               </div>
             </div>
           </div>

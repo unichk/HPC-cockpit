@@ -1,5 +1,6 @@
-// ScheduleGantt — today's schedule at a glance in the dashboard sidebar.
-// Events come from the live /api/schedule feed (absolute ms); we filter to today.
+// ScheduleGantt — a day's schedule at a glance in the dashboard sidebar.
+// Events come from the live /api/schedule feed (absolute ms); we filter to
+// the day specified by `dayOffset` (0 = today, -1 = yesterday, +1 = tomorrow).
 
 const EVT_PALETTE = [
   "#5fb96a","#569cd6","#e8a13a","#c792ea","#4ec9b0",
@@ -10,7 +11,7 @@ const evtColor = id => EVT_PALETTE[((id | 0) - 1 + EVT_PALETTE.length * 2) % EVT
 
 const TIME_W = 24;
 
-function ScheduleGantt({ nodes, events, startH = 0, endH = 24 }) {
+function ScheduleGantt({ nodes, events, startH = 0, endH = 24, dayOffset = 0 }) {
   const { useEffect, useState, useRef } = React;
   const wrapRef = useRef(null);
   const [panelW, setPanelW] = useState(0);
@@ -40,10 +41,16 @@ function ScheduleGantt({ nodes, events, startH = 0, endH = 24 }) {
     return () => clearInterval(t);
   }, []);
 
-  // Decompose each event → which of today's node columns it touches and at what hour fraction.
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-  const todayEnd = new Date(todayStart.getTime() + 24 * 3600 * 1000);
+  // Decompose each event → which of the visible day's node columns it touches
+  // and at what hour fraction. `dayOffset` lets the operator page through
+  // adjacent days from the dashboard sidebar.
+  const dayStart = new Date();
+  dayStart.setHours(0, 0, 0, 0);
+  dayStart.setDate(dayStart.getDate() + dayOffset);
+  const dayEnd = new Date(dayStart.getTime() + 24 * 3600 * 1000);
+  // Backwards-compatible local aliases (the rest of the file used "today*").
+  const todayStart = dayStart;
+  const todayEnd = dayEnd;
 
   const nodeIds = nodes.map(n => n.id);
   if (nodeIds.length === 0) {
@@ -57,7 +64,8 @@ function ScheduleGantt({ nodes, events, startH = 0, endH = 24 }) {
   const totalW = panelW > 0 ? panelW : TIME_W + nodeIds.length * colW;
 
   const hPct = h => `${Math.max(0, Math.min(100, ((h - startH) / totalHours) * 100))}%`;
-  const nowVisible = nowFrac >= startH && nowFrac <= endH;
+  // Only show the now-line when we're actually looking at today.
+  const nowVisible = dayOffset === 0 && nowFrac >= startH && nowFrac <= endH;
   const nowPct = `${((nowFrac - startH) / totalHours) * 100}%`;
 
   // Build list of per-column segments for events overlapping today.

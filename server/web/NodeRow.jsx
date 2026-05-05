@@ -43,12 +43,19 @@ function NodeRow({ node, thresholds, visible, onSelect }) {
         </span>
       </div>
 
+      {/* Distribute the visible cells evenly across the row. */}
       <div className="metrics" style={{
         columnGap: 24,
         paddingLeft: 28,
-        gridTemplateColumns: node.gpuCount > 0
-          ? "auto auto auto auto auto auto auto"
-          : "auto auto auto auto auto auto",
+        gridTemplateColumns: `repeat(${
+          (visible.cpu  ? 1 : 0) +
+          (visible.mem  ? 1 : 0) +
+          (visible.swap ? 1 : 0) +
+          (visible.load ? 1 : 0) +
+          (visible.temp ? 1 : 0) +
+          (visible.fan  ? 1 : 0) +
+          (node.gpuCount > 0 ? 1 : 0)
+        }, minmax(0, 1fr))`,
       }}>
         {visible.cpu && (
           <div className={`metric ${cpuTone}`}>

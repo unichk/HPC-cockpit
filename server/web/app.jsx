@@ -14,42 +14,64 @@ function useClock() {
 function DEFAULT_SETTINGS() {
   return {
     theme: "light",
-    density: "cozy",
-    layout: "row",
-    tempFanGap: 5,
-    metricGap: 12,
     ganttStartH: 0,
     ganttEndH: 24,
     visibleMetrics: { cpu: true, mem: true, swap: true, load: true, temp: true, fan: true },
     alerts: { ...window.DEFAULT_THRESHOLDS },
+    groupAlerts: {
+      idle:  { nodePowerWarn:  300, nodePowerHot:  500 },
+      login: { nodePowerWarn:  500, nodePowerHot:  800 },
+      cpu:   { nodePowerWarn: 1700, nodePowerHot: 1900 },
+      gpu:   { nodePowerWarn: 2200, nodePowerHot: 2500 },
+    },
+    nodeGroups: {},
+  };
+}
+
+function mergeSettings(parsed) {
+  const d = DEFAULT_SETTINGS();
+  if (!parsed || typeof parsed !== "object") return d;
+  const ga = { ...d.groupAlerts };
+  for (const g of Object.keys(ga)) {
+    ga[g] = { ...ga[g], ...((parsed.groupAlerts || {})[g] || {}) };
+  }
+  return {
+    ...d,
+    ...parsed,
+    alerts: { ...d.alerts, ...(parsed.alerts || {}) },
+    visibleMetrics: { ...d.visibleMetrics, ...(parsed.visibleMetrics || {}) },
+    groupAlerts: ga,
+    nodeGroups: { ...(parsed.nodeGroups || {}) },
   };
 }
 
 function App() {
-  const [settings, setSettings] = useState(() => {
-    const saved = localStorage.getItem("cockpit_settings_v1");
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        return { ...DEFAULT_SETTINGS(), ...parsed, alerts: { ...DEFAULT_SETTINGS().alerts, ...(parsed.alerts || {}) }, visibleMetrics: { ...DEFAULT_SETTINGS().visibleMetrics, ...(parsed.visibleMetrics || {}) } };
-      } catch {}
-    }
-    return DEFAULT_SETTINGS();
-  });
+  // Seed from cache so the first paint isn't unstyled, then refresh from
+  // the server in an effect.
+  const [settings, setSettings] = useState(() => mergeSettings(window.readCachedSettings()));
+  const [hydrated, setHydrated] = useState(false);
   const [nodes, setNodes] = useState(() => window.initNodes());
   const [events, setEvents] = useState([]);
-  const [tweaksOpen, setTweaksOpen] = useState(false);
+  const [dayOffset, setDayOffset] = useState(0);
   const thresholds = { ...window.DEFAULT_THRESHOLDS, ...(settings.alerts || {}) };
   const now = useClock();
 
+  // First-load hydrate from server (which also primes localStorage).
   useEffect(() => {
-    localStorage.setItem("cockpit_settings_v1", JSON.stringify(settings));
+    let cancelled = false;
+    window.loadSettings().then(s => {
+      if (!cancelled && s) setSettings(mergeSettings(s));
+      if (!cancelled) setHydrated(true);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
     document.documentElement.dataset.theme = settings.theme;
-    document.documentElement.dataset.density = settings.density;
-    document.documentElement.dataset.layout = settings.layout;
-    document.documentElement.style.setProperty("--tempfan-gap", `${settings.tempFanGap ?? 5}px`);
-    document.documentElement.style.setProperty("--metric-gap", `${settings.metricGap ?? 12}px`);
-  }, [settings]);
+    // Skip writing back the server-hydrated value verbatim — only persist
+    // edits made in this session.
+    if (hydrated) window.saveSettings(settings);
+  }, [settings, hydrated]);
 
   useEffect(() => window.startLiveNodeFeed(setNodes), []);
 
@@ -74,8 +96,15 @@ function App() {
   const rootStyleRef = useRef(null);
   useEffect(() => {
     const n = Math.max(1, nodes.length);
+    // Subtract the chrome (topbar + footer + .app vertical padding + row-gaps)
+    // first, then divide the remaining height among the visible rows.
+    //   topbar ≈ 60   footer ≈ 22   app padding (8 top + 4 bot) = 12
+    //   row-gap × 2 (between topbar/body and body/footer) = 28
+    // Total ≈ 122; round up to 138 for breathing room and font-size variance.
+    const CHROME_PX = 138;
     const denom = Math.min(4, n);
-    const rowH = `calc((100vh - 102px - ${Math.max(0, denom - 1)} * var(--gap)) / ${denom})`;
+    const bodyH = `(100vh - ${CHROME_PX}px)`;
+    const rowH = `calc((${bodyH} - ${Math.max(0, denom - 1)} * var(--gap)) / ${denom})`;
     document.documentElement.style.setProperty("--row-h", rowH);
   }, [nodes.length]);
 
@@ -83,8 +112,9 @@ function App() {
   const totalPower = liveNodes.reduce((a, n) => a + n.power, 0);
   const offlineCount = nodes.length - liveNodes.length;
 
-  const critNodes = nodes.filter((n) => window.classifyNode(n, thresholds) === "crit" || (n.offline || n.age >= thresholds.ageStale));
-  const warnNodes = nodes.filter((n) => window.classifyNode(n, thresholds) === "warn");
+  const thrFor = (n) => window.nodeThresholds(n.id, settings, thresholds);
+  const critNodes = nodes.filter((n) => window.classifyNode(n, thrFor(n)) === "crit" || (n.offline || n.age >= thresholds.ageStale));
+  const warnNodes = nodes.filter((n) => window.classifyNode(n, thrFor(n)) === "warn");
 
   const critCount = critNodes.length;
   const warnCount = warnNodes.length;
@@ -170,18 +200,12 @@ function App() {
             )}
           </button>
 
-          <button
-            className={`icon-btn ${tweaksOpen ? "active" : ""}`}
-            onClick={() => setTweaksOpen(!tweaksOpen)}
-            title="Tweaks"
-          >
+          <a className="icon-btn" href="settings.html" title="Settings">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>
-              <line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>
-              <line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>
-              <line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
             </svg>
-          </button>
+          </a>
         </div>
       </header>
 
@@ -197,7 +221,7 @@ function App() {
           <window.NodeRow
             key={n.id}
             node={n}
-            thresholds={thresholds}
+            thresholds={thrFor(n)}
             visible={settings.visibleMetrics}
             onSelect={() => { window.location.href = `node.html?node=${encodeURIComponent(n.id)}`; }}
           />
@@ -221,19 +245,28 @@ function App() {
 
       <aside className="schedule-sidebar" style={{gridColumn:2,gridRow:2}}>
         <div className="schedule-sidebar-head">
-          <h3>Today · {new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"})}</h3>
+          <div style={{display:"flex",alignItems:"center",gap:4,flex:1,minWidth:0}}>
+            <button className="sch-day-nav" onClick={() => setDayOffset(d => d - 1)} title="Previous day">‹</button>
+            <h3 style={{margin:0,flex:1,textAlign:"center",fontSize:10,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+              {(() => {
+                const d = new Date(); d.setDate(d.getDate() + dayOffset);
+                const label = dayOffset === 0
+                  ? "Today"
+                  : dayOffset === -1 ? "Yesterday"
+                  : dayOffset === 1 ? "Tomorrow"
+                  : d.toLocaleDateString("en-US", { weekday: "short" });
+                return `${label} · ${d.toLocaleDateString("en-US",{month:"short",day:"numeric"})}`;
+              })()}
+            </h3>
+            <button className="sch-day-nav" onClick={() => setDayOffset(d => d + 1)} title="Next day">›</button>
+            {dayOffset !== 0 && (
+              <button className="sch-day-nav today" onClick={() => setDayOffset(0)} title="Jump to today">●</button>
+            )}
+          </div>
           <a href="schedule.html" className="schedule-sidebar-edit">Full →</a>
         </div>
-        <window.ScheduleGantt nodes={nodes} events={events} startH={settings.ganttStartH ?? 0} endH={settings.ganttEndH ?? 24} />
+        <window.ScheduleGantt nodes={nodes} events={events} startH={settings.ganttStartH ?? 0} endH={settings.ganttEndH ?? 24} dayOffset={dayOffset} />
       </aside>
-
-      {tweaksOpen && (
-        <window.TweaksPanel
-          settings={settings}
-          onChange={setSettings}
-          onClose={() => setTweaksOpen(false)}
-        />
-      )}
     </div>
   );
 }

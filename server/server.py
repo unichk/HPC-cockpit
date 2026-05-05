@@ -153,6 +153,105 @@ class ScheduleStore:
         return False
 
 
+DEFAULT_SETTINGS = {
+    "theme": "light",
+    "ganttStartH": 0,
+    "ganttEndH": 24,
+    "visibleMetrics": {
+        "cpu": True, "mem": True, "swap": True,
+        "load": True, "temp": True, "fan": True,
+    },
+    "alerts": {
+        "ageWarn": 15, "ageStale": 60,
+        "cpuWarn": 80, "cpuHot": 95,
+        "tempWarn": 80, "tempCrit": 90,
+        "fanOkRatio": 1.0,
+        "nodePowerWarn": 1700, "nodePowerHot": 1900,
+        "totalPowerWarn": 4500, "totalPowerHot": 4800,
+    },
+    # Per-group power-draw bands. Used when a node is assigned to a group
+    # via `nodeGroups`; otherwise the node falls back to alerts.nodePowerWarn/Hot.
+    "groupAlerts": {
+        "idle":  {"nodePowerWarn":  300, "nodePowerHot":  500},
+        "login": {"nodePowerWarn":  500, "nodePowerHot":  800},
+        "cpu":   {"nodePowerWarn": 1700, "nodePowerHot": 1900},
+        "gpu":   {"nodePowerWarn": 2200, "nodePowerHot": 2500},
+    },
+    # nodeId → group name. Set from the per-node detail page.
+    "nodeGroups": {},
+}
+
+
+class SettingsStore:
+    """Persists UI settings to a JSON file with atomic replace."""
+
+    def __init__(self, path: str) -> None:
+        self._lock = threading.Lock()
+        self._path = path
+        self._settings = json.loads(json.dumps(DEFAULT_SETTINGS))
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self._path):
+            return
+        try:
+            with open(self._path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            return
+        if isinstance(data, dict):
+            self._settings = self._merge(DEFAULT_SETTINGS, data)
+
+    @staticmethod
+    def _merge(base: dict, override: dict) -> dict:
+        # Shallow-merge top level; deep-merge for known dict children
+        # (visibleMetrics, alerts, groupAlerts, nodeGroups) so a partial
+        # save doesn't drop unrelated keys.
+        out = json.loads(json.dumps(base))
+        for k, v in override.items():
+            if k in ("visibleMetrics", "alerts", "nodeGroups") and isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k].update({sk: sv for sk, sv in v.items() if isinstance(sv, (int, float, bool, str))})
+            elif k == "groupAlerts" and isinstance(v, dict) and isinstance(out.get(k), dict):
+                # Two levels deep: groupAlerts -> {idle, login, ...} -> {nodePowerWarn, nodePowerHot}
+                for gname, gvals in v.items():
+                    if not isinstance(gvals, dict):
+                        continue
+                    if gname not in out[k] or not isinstance(out[k][gname], dict):
+                        out[k][gname] = {}
+                    out[k][gname].update({sk: sv for sk, sv in gvals.items() if isinstance(sv, (int, float))})
+            elif isinstance(v, (int, float, bool, str, list)):
+                out[k] = v
+        return out
+
+    def _save_locked(self) -> None:
+        directory = os.path.dirname(os.path.abspath(self._path)) or "."
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=".settings-", suffix=".json.tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(self._settings, handle, indent=2)
+                handle.write("\n")
+            os.replace(tmp_path, self._path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def get(self) -> dict:
+        with self._lock:
+            return json.loads(json.dumps(self._settings))
+
+    def replace(self, payload: dict):
+        if not isinstance(payload, dict):
+            return None, "body must be an object"
+        with self._lock:
+            self._settings = self._merge(DEFAULT_SETTINGS, payload)
+            self._save_locked()
+            return json.loads(json.dumps(self._settings)), None
+
+
 class StateStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -597,6 +696,7 @@ def proxy_exec_to_worker(
 class ApiHandler(SimpleHTTPRequestHandler):
     state: StateStore = None
     schedule: ScheduleStore = None
+    settings: SettingsStore = None
     test_mode: bool = False
     worker_exec_port: int = 9100
 
@@ -632,6 +732,10 @@ class ApiHandler(SimpleHTTPRequestHandler):
 
         if self.path == "/api/schedule":
             self._json({"events": self.schedule.list_events()})
+            return
+
+        if self.path == "/api/settings":
+            self._json(self.settings.get())
             return
 
         if self.path == "/":
@@ -698,6 +802,17 @@ class ApiHandler(SimpleHTTPRequestHandler):
                 self._json({"error": err}, status=HTTPStatus.BAD_REQUEST)
                 return
             self._json(event, status=HTTPStatus.CREATED)
+            return
+
+        if self.path == "/api/settings":
+            body = self._read_json_body()
+            if body is None:
+                return
+            saved, err = self.settings.replace(body)
+            if err:
+                self._json({"error": err}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._json(saved)
             return
 
         exec_suffix = "/exec"
@@ -837,11 +952,13 @@ def start_http_server(
     bind_port: int,
     state: StateStore,
     schedule: ScheduleStore,
+    settings: SettingsStore,
     web_dir: str,
     worker_exec_port: int,
 ) -> ThreadingHTTPServer:
     ApiHandler.state = state
     ApiHandler.schedule = schedule
+    ApiHandler.settings = settings
     ApiHandler.worker_exec_port = worker_exec_port
 
     def factory(*args, **kwargs):
@@ -863,6 +980,11 @@ def parse_args() -> argparse.Namespace:
         help="Path to schedule JSON file (default: <server_dir>/schedule.json)",
     )
     parser.add_argument(
+        "--settings-file",
+        default=None,
+        help="Path to settings JSON file (default: <server_dir>/settings.json)",
+    )
+    parser.add_argument(
         "--worker-exec-port",
         type=int,
         default=9100,
@@ -882,8 +1004,10 @@ def main() -> int:
     base_dir = os.path.dirname(os.path.abspath(__file__))
     web_dir = os.path.join(base_dir, "web")
     schedule_path = args.schedule_file or os.path.join(base_dir, "schedule.json")
+    settings_path = args.settings_file or os.path.join(base_dir, "settings.json")
     state = StateStore()
     schedule = ScheduleStore(schedule_path)
+    settings = SettingsStore(settings_path)
     ApiHandler.test_mode = args.test_panel
 
     if args.worker_exec_port <= 0 or args.worker_exec_port > 65535:
@@ -896,6 +1020,7 @@ def main() -> int:
         args.http_port,
         state,
         schedule,
+        settings,
         web_dir,
         args.worker_exec_port,
     )
@@ -906,7 +1031,7 @@ def main() -> int:
     print(
         f"udp_listen={args.udp_host}:{args.udp_port} "
         f"http_listen={args.http_host}:{args.http_port} "
-        f"web_dir={web_dir} schedule_file={schedule_path}"
+        f"web_dir={web_dir} schedule_file={schedule_path} settings_file={settings_path}"
     )
 
     try:

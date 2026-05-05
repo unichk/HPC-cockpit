@@ -86,6 +86,86 @@ function governorsFromMask(mask) {
   return out;
 }
 
+// Server-backed settings persistence. Reads/writes /api/settings, with a
+// localStorage cache so the UI renders immediately on next load even before
+// the network round-trip completes (and as a hard fallback if the server is
+// unreachable). Callers that mutate settings should call saveSettings(); the
+// helper debounces+coalesces server writes to avoid hammering the endpoint.
+const SETTINGS_KEY = "cockpit_settings_v1";
+let _saveTimer = null;
+let _pendingSettings = null;
+
+async function loadSettings() {
+  try {
+    const r = await fetch("/api/settings", { cache: "no-store" });
+    if (r.ok) {
+      const body = await r.json();
+      if (body && typeof body === "object") {
+        try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(body)); } catch {}
+        return body;
+      }
+    }
+  } catch {}
+  // Fallback to whatever is cached locally.
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return null;
+}
+
+function readCachedSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function saveSettings(settings) {
+  // Always update the local cache immediately so a reload on the same browser
+  // sees the new values even if the server is mid-flight or offline.
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {}
+  _pendingSettings = settings;
+  if (_saveTimer) return;
+  _saveTimer = setTimeout(async () => {
+    _saveTimer = null;
+    const payload = _pendingSettings;
+    _pendingSettings = null;
+    try {
+      await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch {}
+  }, 350);
+}
+
+// Resolve a node's effective power thresholds. If the node has been assigned
+// to a group via settings.nodeGroups[nodeId], use that group's bands from
+// settings.groupAlerts; otherwise fall back to the global alerts.
+function resolveNodePower(nodeId, settings) {
+  const fallback = {
+    nodePowerWarn: settings?.alerts?.nodePowerWarn,
+    nodePowerHot:  settings?.alerts?.nodePowerHot,
+  };
+  const group = settings?.nodeGroups?.[nodeId];
+  if (!group) return fallback;
+  const ga = settings?.groupAlerts?.[group];
+  if (!ga) return fallback;
+  return {
+    nodePowerWarn: ga.nodePowerWarn ?? fallback.nodePowerWarn,
+    nodePowerHot:  ga.nodePowerHot  ?? fallback.nodePowerHot,
+  };
+}
+
+// Returns the global threshold dict with the power keys overridden when the
+// node belongs to a group. Pass the result to classifyNode / NodeRow.
+function nodeThresholds(nodeId, settings, base) {
+  const power = resolveNodePower(nodeId, settings);
+  return { ...base, ...power };
+}
+
 const DEFAULT_THRESHOLDS = {
   ageWarn: 15,
   ageStale: 60,
@@ -464,4 +544,9 @@ Object.assign(window, {
   startLiveNodeFeed,
   startLiveNodeDetail,
   fetchNode,
+  loadSettings,
+  saveSettings,
+  readCachedSettings,
+  resolveNodePower,
+  nodeThresholds,
 });

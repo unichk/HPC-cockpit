@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" />
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=6" />
     <style>
       .nd-layout { display: grid; grid-template-rows: auto 1fr auto; min-height: 100vh; padding: 8px 10px 6px; gap: 8px; }
       .nd-topbar { display: flex; align-items: center; gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 8px 14px; box-shadow: var(--shadow-sm); }
@@ -123,7 +123,7 @@
     <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
     <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
-    <script src="live-data.js?v=7"></script>
+    <script src="live-data.js?v=8"></script>
     <script type="text/babel">
       const { useState, useEffect, useMemo } = React;
       const THR = window.DEFAULT_THRESHOLDS;
@@ -202,6 +202,8 @@
         const current = readSettings();
         const next = { ...current, ...patch };
         try { localStorage.setItem("cockpit_settings_v1", JSON.stringify(next)); } catch {}
+        // Mirror to server so the change survives a localStorage clear / new browser.
+        if (window.saveSettings) window.saveSettings(next);
         return next;
       }
       function readThemeFromSettings() {
@@ -1381,7 +1383,38 @@
         const [gpuOpen, setGpuOpen] = useState(false);
         const [coresOpen, setCoresOpen] = useState(false);
         const now = useClock();
-        const thr = useMemo(readThresholdsFromSettings, []);
+        const [settings, setSettings] = useState(() => readSettings());
+        const baseThr = { ...THR, ...(settings.alerts || {}) };
+        // Group power overrides apply when this node is in nodeGroups.
+        const thr = window.nodeThresholds
+          ? window.nodeThresholds(nodeId, settings, baseThr)
+          : baseThr;
+        const currentGroup = (settings.nodeGroups && settings.nodeGroups[nodeId]) || "";
+
+        // Hydrate from server on mount so per-node thresholds reflect what was
+        // saved on the settings page (which writes to /api/settings, not just
+        // localStorage).
+        useEffect(() => {
+          if (!window.loadSettings) return;
+          let cancelled = false;
+          window.loadSettings().then(s => {
+            if (cancelled || !s) return;
+            if (s.theme && s.theme !== theme) setTheme(s.theme);
+            setSettings(s);
+          });
+          return () => { cancelled = true; };
+        }, []);
+
+        function setNodeGroup(group) {
+          const next = {
+            ...settings,
+            nodeGroups: { ...(settings.nodeGroups || {}) },
+          };
+          if (group) next.nodeGroups[nodeId] = group;
+          else delete next.nodeGroups[nodeId];
+          setSettings(next);
+          writeSettings({ nodeGroups: next.nodeGroups });
+        }
 
         useEffect(() => {
           document.documentElement.dataset.theme = theme;
@@ -1453,6 +1486,18 @@
                 {isOffline ? `offline · ${Math.floor(node.age)}s ago` : `live · ${node.age.toFixed(1)}s`}
               </span>
               <div className="nd-spacer" />
+              <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:11, fontWeight:600, color:"var(--muted)", letterSpacing:"0.04em", textTransform:"uppercase" }}>
+                Group
+                <select value={currentGroup} onChange={e => setNodeGroup(e.target.value)}
+                  style={{ padding:"4px 8px", borderRadius:6, border:"1px solid var(--line)", background:"var(--surface-2)", color:"var(--ink)", fontFamily:"var(--font)", fontSize:12, fontWeight:600, cursor:"pointer" }}
+                  title="Apply group power thresholds to this node">
+                  <option value="">— ungrouped —</option>
+                  <option value="idle">idle</option>
+                  <option value="login">login</option>
+                  <option value="cpu">cpu</option>
+                  <option value="gpu">gpu</option>
+                </select>
+              </label>
               <span className="nd-clock">{now.toLocaleTimeString("en-US", { hour12: false })}</span>
               <button className="icon-btn" onClick={() => setTheme(t => t === "dark" ? "light" : "dark")} title="Toggle theme">
                 {theme === "dark"

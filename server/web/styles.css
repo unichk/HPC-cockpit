@@ -68,17 +68,6 @@
   --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.5), 0 8px 20px rgba(0, 0, 0, 0.4);
 }
 
-[data-density="compact"] {
-  --metric-gap: 12px;
-  --tempfan-gap: 5px;
-  --pad: 10px;
-  --gap: 6px;
-}
-[data-density="comfortable"] {
-  --pad: 18px;
-  --gap: 10px;
-}
-
 * { box-sizing: border-box; }
 html, body {
   margin: 0;
@@ -103,10 +92,18 @@ body {
 .app {
   display: grid;
   grid-template-rows: auto 1fr auto;
-  grid-template-columns: 1fr 240px;
-  min-height: 100vh;
+  /* minmax(0, 1fr) lets the node column shrink past its min-content width
+     so the 240px schedule column never gets pushed off-screen. */
+  grid-template-columns: minmax(0, 1fr) 240px;
+  /* Lock to the viewport so the topbar/footer stay pinned and only the
+     middle row scrolls. */
+  height: 100vh;
+  overflow: hidden;
   padding: 8px 10px 4px;
-  gap: 6px;
+  /* Row gap is the only breathing room between topbar/body/footer now that
+     the page no longer scrolls. */
+  row-gap: 14px;
+  column-gap: 6px;
 }
 
 /* ─── Top bar ───────────────────────────────────────────────────── */
@@ -312,11 +309,12 @@ body {
   grid-template-columns: 1fr;
   gap: var(--gap);
   align-content: start;
+  /* Always scroll inside the middle row — the .app shell owns the
+     viewport height so nodes can't push the topbar/footer out. */
   min-height: 0;
-}
-.grid.overflow {
+  min-width: 0;
   overflow-y: auto;
-  max-height: calc(100vh - 80px);
+  height: 100%;
 }
 
 .grid-empty {
@@ -738,11 +736,10 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Fills the middle row's height — .app is now viewport-locked so the
+     row already has a finite height; no calc(100vh - …) needed. */
+  height: 100%;
   min-height: 0;
-  position: sticky;
-  top: 8px;
-  height: calc(100vh - 80px);
-  align-self: start;
   padding-bottom: 8px;
 }
 .schedule-sidebar-head {
@@ -774,6 +771,26 @@ body {
   white-space: nowrap;
 }
 .schedule-sidebar-edit:hover { background: var(--accent); color: #fff; }
+
+.sch-day-nav {
+  flex-shrink: 0;
+  width: 18px; height: 18px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 120ms;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.sch-day-nav:hover { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 30%, var(--line)); }
+.sch-day-nav.today { color: var(--accent); font-size: 8px; }
 
 .sch-mini-empty { padding: 14px 12px; font-size: 11px; color: var(--muted); text-align: center; }
 
