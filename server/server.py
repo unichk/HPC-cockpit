@@ -179,6 +179,14 @@ DEFAULT_SETTINGS = {
     },
     # nodeId → group name. Set from the per-node detail page.
     "nodeGroups": {},
+    # Audio cues fired when a node escalates to warn/crit on the dashboard.
+    "alarms": {
+        "enabled": True,
+        "volume": 0.7,
+        # Paths under server/web/. Empty string silences that level.
+        "warnSound": "sounds/warn.mp3",
+        "critSound": "sounds/crit.mp3",
+    },
 }
 
 
@@ -209,7 +217,7 @@ class SettingsStore:
         # save doesn't drop unrelated keys.
         out = json.loads(json.dumps(base))
         for k, v in override.items():
-            if k in ("visibleMetrics", "alerts", "nodeGroups") and isinstance(v, dict) and isinstance(out.get(k), dict):
+            if k in ("visibleMetrics", "alerts", "nodeGroups", "alarms") and isinstance(v, dict) and isinstance(out.get(k), dict):
                 out[k].update({sk: sv for sk, sv in v.items() if isinstance(sv, (int, float, bool, str))})
             elif k == "groupAlerts" and isinstance(v, dict) and isinstance(out.get(k), dict):
                 # Two levels deep: groupAlerts -> {idle, login, ...} -> {nodePowerWarn, nodePowerHot}
@@ -736,6 +744,18 @@ class ApiHandler(SimpleHTTPRequestHandler):
 
         if self.path == "/api/settings":
             self._json(self.settings.get())
+            return
+
+        if self.path == "/api/sounds":
+            sounds_dir = os.path.join(self.directory, "sounds")
+            files = []
+            try:
+                for entry in sorted(os.listdir(sounds_dir)):
+                    if entry.lower().endswith((".mp3", ".ogg", ".wav")):
+                        files.append(entry)
+            except FileNotFoundError:
+                pass
+            self._json({"sounds": files})
             return
 
         if self.path == "/":

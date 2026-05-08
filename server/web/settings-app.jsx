@@ -26,12 +26,23 @@ const DEFAULT_SETTINGS = {
     gpu:   { nodePowerWarn: 2200, nodePowerHot: 2500 },
   },
   nodeGroups: {},
+  alarms: {
+    enabled: true,
+    volume: 0.7,
+    warnSound: "sounds/warn.mp3",
+    critSound: "sounds/crit.mp3",
+  },
 };
 
 const NAV_ITEMS = [
   { id: "appearance", label: "Appearance", icon: (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+    </svg>
+  )},
+  { id: "alarms", label: "Alarms", icon: (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
     </svg>
   )},
   { id: "thresholds", label: "Thresholds", icon: (
@@ -162,6 +173,7 @@ function mergeWithDefaults(parsed) {
     visibleMetrics: { ...DEFAULT_SETTINGS.visibleMetrics, ...(parsed.visibleMetrics || {}) },
     groupAlerts: ga,
     nodeGroups: { ...(parsed.nodeGroups || {}) },
+    alarms: { ...DEFAULT_SETTINGS.alarms, ...(parsed.alarms || {}) },
   };
 }
 
@@ -188,7 +200,20 @@ function SettingsApp() {
 
   const set = useCallback((k, v) => setSettings(s => ({ ...s, [k]: v })), []);
   const setAlert = useCallback((k, v) => setSettings(s => ({ ...s, alerts: { ...s.alerts, [k]: Number(v) } })), []);
+  const setAlarm = useCallback((k, v) => setSettings(s => ({ ...s, alarms: { ...(s.alarms || {}), [k]: v } })), []);
   const toggleMetric = useCallback((m) => setSettings(s => ({ ...s, visibleMetrics: { ...s.visibleMetrics, [m]: !s.visibleMetrics[m] } })), []);
+
+  // Pull the available-sounds list once on mount so the dropdowns can show
+  // any extra files the operator dropped into server/web/sounds/.
+  const [soundFiles, setSoundFiles] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/sounds", { cache: "no-store" })
+      .then(r => r.ok ? r.json() : { sounds: [] })
+      .then(d => { if (!cancelled && Array.isArray(d.sounds)) setSoundFiles(d.sounds); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   const save = () => {
     if (window.saveSettings) window.saveSettings(settings);
@@ -310,6 +335,53 @@ function SettingsApp() {
                 ))}
               </div>
             </SettingRow>
+          </Section>
+
+          <Section id="alarms" title="Alarms" sub="Audio cues on warn / crit"
+            icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>}
+          >
+            {(() => {
+              const alarms = settings.alarms || {};
+              const soundOpts = [{ value: "", label: "(silent)" }, ...soundFiles.map(f => ({ value: `sounds/${f}`, label: f }))];
+              return (
+                <>
+                  <SettingRow name="Audio alarms" desc="Play a sound when a node escalates to warn or crit">
+                    <div className="settings-seg">
+                      {[["off", false], ["on", true]].map(([lbl, v]) => (
+                        <button key={lbl} className={alarms.enabled === v ? "active" : ""} onClick={() => setAlarm("enabled", v)}>
+                          {lbl === "off" ? "Off" : "On"}
+                        </button>
+                      ))}
+                    </div>
+                  </SettingRow>
+
+                  <SettingRow name="Volume" desc="Playback volume for both warn and crit cues">
+                    <ThresholdSlider value={Math.round((alarms.volume ?? 0.7) * 100)} min={0} max={100} step={5}
+                      onChange={v => setAlarm("volume", v / 100)} />
+                    <span className="setting-value-badge">{Math.round((alarms.volume ?? 0.7) * 100)}%</span>
+                  </SettingRow>
+
+                  <SettingRow name="Warn sound" desc="Played when a node escalates to warn">
+                    <select value={alarms.warnSound ?? ""} onChange={e => setAlarm("warnSound", e.target.value)}
+                      style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface-2)", color: "var(--ink)", fontFamily: "var(--mono)", fontSize: 12, fontWeight: 600, minWidth: 180 }}>
+                      {soundOpts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  </SettingRow>
+
+                  <SettingRow name="Crit sound" desc="Played when a node escalates to crit">
+                    <select value={alarms.critSound ?? ""} onChange={e => setAlarm("critSound", e.target.value)}
+                      style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface-2)", color: "var(--ink)", fontFamily: "var(--mono)", fontSize: 12, fontWeight: 600, minWidth: 180 }}>
+                      {soundOpts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  </SettingRow>
+
+                  <SettingRow name="Test sound" desc="Plays the configured cue immediately (also primes browser autoplay)">
+                    <button className="btn-ghost" onClick={() => window.cockpitAlarms?.fireAlarm("warn", { ...alarms, enabled: true })}>⚠ Warn</button>
+                    <button className="btn-ghost" onClick={() => window.cockpitAlarms?.fireAlarm("crit", { ...alarms, enabled: true })}>⛔ Crit</button>
+                  </SettingRow>
+                </>
+              );
+            })()}
           </Section>
 
           <Section id="thresholds" title="Alert Thresholds" sub="Warn / Critical levels"

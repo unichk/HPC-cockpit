@@ -25,6 +25,13 @@ function DEFAULT_SETTINGS() {
       gpu:   { nodePowerWarn: 2200, nodePowerHot: 2500 },
     },
     nodeGroups: {},
+    alarms: {
+      enabled: true,
+      volume: 0.7,
+      repeat: false,
+      warnSound: "sounds/warn.mp3",
+      critSound: "sounds/crit.mp3",
+    },
   };
 }
 
@@ -42,7 +49,15 @@ function mergeSettings(parsed) {
     visibleMetrics: { ...d.visibleMetrics, ...(parsed.visibleMetrics || {}) },
     groupAlerts: ga,
     nodeGroups: { ...(parsed.nodeGroups || {}) },
+    alarms: { ...d.alarms, ...(parsed.alarms || {}) },
   };
+}
+
+// True only when status `b` is strictly worse than `a`. De-escalations and
+// same-state ticks are silent.
+function alarmEscalated(a, b) {
+  const rank = { ok: 0, warn: 1, crit: 2, "crit-offline": 2 };
+  return (rank[b] ?? 0) > (rank[a] ?? 0);
 }
 
 function App() {
@@ -55,6 +70,28 @@ function App() {
   const [dayOffset, setDayOffset] = useState(0);
   const thresholds = { ...window.DEFAULT_THRESHOLDS, ...(settings.alerts || {}) };
   const now = useClock();
+
+  // Audio-alarm bookkeeping. priorStatus tracks per-node classification across
+  // ticks so we can detect ok→warn / warn→crit transitions; settingsRef gives
+  // the live-feed callback (which captures the initial settings closure) access
+  // to current values without re-binding. clusterLevel + snoozedLevel drive the
+  // warn 30s cadence and the crit-while-active loop, plus the topbar Snooze.
+  const priorStatusRef = useRef(new Map());
+  const settingsRef = useRef(settings);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
+  const [clusterLevel, setClusterLevel] = useState("ok");  // "ok"|"warn"|"crit"
+  const [snoozedLevel, setSnoozedLevel] = useState(null);  // null|"warn"|"crit"
+  const clusterLevelRef = useRef("ok");
+  const snoozedLevelRef = useRef(null);
+  useEffect(() => { clusterLevelRef.current = clusterLevel; }, [clusterLevel]);
+  useEffect(() => { snoozedLevelRef.current = snoozedLevel; }, [snoozedLevel]);
+
+  // Helpers used by both the live-feed callback and the warn-repeat interval.
+  const levelRank = { ok: 0, warn: 1, crit: 2 };
+  const isSnoozed = (level) => {
+    const sn = snoozedLevelRef.current;
+    return sn != null && (levelRank[level] ?? 0) <= (levelRank[sn] ?? 0);
+  };
 
   // First-load hydrate from server (which also primes localStorage).
   useEffect(() => {
@@ -73,7 +110,95 @@ function App() {
     if (hydrated) window.saveSettings(settings);
   }, [settings, hydrated]);
 
-  useEffect(() => window.startLiveNodeFeed(setNodes), []);
+  useEffect(() => {
+    function consumeNodes(next) {
+      setNodes(next);
+      const s = settingsRef.current;
+      const baseThr = { ...window.DEFAULT_THRESHOLDS, ...(s.alerts || {}) };
+      const classify = (n) => window.classifyNode(n, window.nodeThresholds(n.id, s, baseThr));
+      const alarms = s.alarms || {};
+      const A = window.cockpitAlarms;
+
+      // First tick after mount: seed baseline only, never fire — opening the
+      // dashboard during an ongoing crit shouldn't blast on page load.
+      const firstTick = priorStatusRef.current.size === 0;
+
+      // Compute per-node statuses + the cluster max (worst across all nodes).
+      let escalatedTo = null;  // any escalation this tick: "warn"|"crit"
+      let clusterMax = "ok";   // worst current state across all nodes
+      next.forEach(n => {
+        const cur = classify(n);
+        const norm = (cur === "crit-offline") ? "crit" : cur;
+        const before = priorStatusRef.current.get(n.id) || "ok";
+        if (!firstTick && alarmEscalated(before, cur)) {
+          if (norm === "crit") escalatedTo = "crit";
+          else if (norm === "warn" && escalatedTo !== "crit") escalatedTo = "warn";
+        }
+        priorStatusRef.current.set(n.id, cur);
+        if ((levelRank[norm] ?? 0) > (levelRank[clusterMax] ?? 0)) clusterMax = norm;
+      });
+
+      // Surface the cluster level to React state (drives Snooze button visibility
+      // and labels) — only set if changed, to avoid render thrash.
+      if (clusterMax !== clusterLevelRef.current) setClusterLevel(clusterMax);
+
+      // De-escalation auto-clears Snooze: if everything's now <= a lower tier,
+      // the snooze for the higher tier is no longer relevant.
+      const sn = snoozedLevelRef.current;
+      if (sn && (levelRank[clusterMax] ?? 0) < (levelRank[sn] ?? 0)) setSnoozedLevel(null);
+
+      if (firstTick || !A) return;
+
+      // Crit handling: while any node is crit and not snoozed at crit, the
+      // crit clip loops continuously. Stop the loop the moment crit clears.
+      if (clusterMax === "crit" && !isSnoozed("crit")) {
+        // Fire a one-shot too if this tick is the actual escalation moment
+        // — gives an immediate cue even if loop start is gated by autoplay.
+        if (escalatedTo === "crit") A.fireAlarm("crit", alarms);
+        A.startCritLoop(alarms);
+      } else {
+        A.stopCritLoop();
+      }
+
+      // Warn one-shot fires only on the transition; the 30s repeat is handled
+      // by a separate setInterval below.
+      if (escalatedTo === "warn" && clusterMax !== "crit" && !isSnoozed("warn")) {
+        A.fireAlarm("warn", alarms);
+      }
+    }
+    return window.startLiveNodeFeed(consumeNodes);
+  }, []);
+
+  // Warn repeat: every 30 s, while the cluster is warn-only and not snoozed,
+  // re-fire the warn cue. (Crit handles its own continuous loop.)
+  useEffect(() => {
+    if (!settings.alarms?.enabled) return;
+    const handle = setInterval(() => {
+      const lvl = clusterLevelRef.current;
+      if (lvl === "warn" && !isSnoozed("warn")) {
+        window.cockpitAlarms?.fireAlarm("warn", settingsRef.current.alarms || {});
+      }
+    }, 30000);
+    return () => clearInterval(handle);
+  }, [settings.alarms?.enabled]);
+
+  // When alarms get disabled (mute toggle, or whole feature off) make sure the
+  // crit loop isn't still droning on.
+  useEffect(() => {
+    if (!settings.alarms?.enabled) window.cockpitAlarms?.stopCritLoop();
+  }, [settings.alarms?.enabled]);
+
+  // Prime the audio cache on every user gesture (Chrome/Safari autoplay).
+  // primeAudio is idempotent once each element is unlocked, so re-running on
+  // every click is cheap and far more forgiving than a once-only first-click
+  // listener that competes with React's synthetic event system.
+  useEffect(() => {
+    function onClick() {
+      window.cockpitAlarms?.primeAudio(settingsRef.current.alarms || {});
+    }
+    window.addEventListener("click", onClick, true);  // capture phase, before stopPropagation
+    return () => window.removeEventListener("click", onClick, true);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -196,6 +321,59 @@ function App() {
             ) : (
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+              </svg>
+            )}
+          </button>
+
+          {/* Snooze: visible only when the cluster is actively alerting and
+              we're not already snoozed at the current level. Click silences
+              warn/crit until the cluster de-escalates or escalates further. */}
+          {clusterLevel !== "ok" && !(snoozedLevel && (levelRank[clusterLevel] ?? 0) <= (levelRank[snoozedLevel] ?? 0)) && (
+            <button
+              className="icon-btn"
+              onClick={() => {
+                setSnoozedLevel(clusterLevel);
+                window.cockpitAlarms?.stopCritLoop();
+              }}
+              title={`Ignore current ${clusterLevel} alarm`}
+              style={{ color: clusterLevel === "crit" ? "var(--crit)" : "var(--warn)" }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M6 19V5l12 7-12 7z" transform="rotate(90 12 12)"/>
+                <path d="M9 9l6 6M15 9l-6 6"/>
+              </svg>
+            </button>
+          )}
+          {snoozedLevel && (
+            <button
+              className="icon-btn active"
+              onClick={() => setSnoozedLevel(null)}
+              title={`Snoozed at ${snoozedLevel} — click to resume`}
+              style={{ color: "var(--muted)" }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2 4h6l-6 8h6"/><path d="M14 4h8l-8 16h8"/>
+              </svg>
+            </button>
+          )}
+
+          <button
+            className={`icon-btn ${settings.alarms?.enabled ? "" : "active"}`}
+            onClick={() => setSettings({ ...settings, alarms: { ...(settings.alarms || {}), enabled: !settings.alarms?.enabled } })}
+            title={settings.alarms?.enabled ? "Mute alarms" : "Unmute alarms"}
+          >
+            {settings.alarms?.enabled ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                <path d="M18.63 13A17.89 17.89 0 0 1 18 8"/>
+                <path d="M6.26 6.26A5.86 5.86 0 0 0 6 8c0 7-3 9-3 9h14"/>
+                <path d="M18 8a6 6 0 0 0-9.33-5"/>
+                <line x1="1" y1="1" x2="23" y2="23"/>
               </svg>
             )}
           </button>
