@@ -179,6 +179,10 @@ DEFAULT_SETTINGS = {
     },
     # nodeId → group name. Set from the per-node detail page.
     "nodeGroups": {},
+    # Saved per-node group presets ("modes"). The dashboard's mode picker
+    # applies one of these by overwriting nodeGroups. Each entry:
+    #   {"id": "<slug>", "name": "<display>", "groups": {nodeId: groupName}}
+    "modes": [],
     # Audio cues fired when a node escalates to warn/crit on the dashboard.
     "alarms": {
         "enabled": True,

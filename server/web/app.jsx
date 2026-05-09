@@ -25,6 +25,7 @@ function DEFAULT_SETTINGS() {
       gpu:   { nodePowerWarn: 2200, nodePowerHot: 2500 },
     },
     nodeGroups: {},
+    modes: [],
     alarms: {
       enabled: true,
       volume: 0.7,
@@ -49,8 +50,25 @@ function mergeSettings(parsed) {
     visibleMetrics: { ...d.visibleMetrics, ...(parsed.visibleMetrics || {}) },
     groupAlerts: ga,
     nodeGroups: { ...(parsed.nodeGroups || {}) },
+    modes: Array.isArray(parsed.modes) ? parsed.modes.map(m => ({
+      id: String(m?.id ?? `mode-${Math.random().toString(36).slice(2, 8)}`),
+      name: String(m?.name ?? "Untitled mode"),
+      groups: (m && typeof m.groups === "object" && m.groups) ? { ...m.groups } : {},
+    })) : [],
     alarms: { ...d.alarms, ...(parsed.alarms || {}) },
   };
+}
+
+// Shallow-equal two {nodeId: groupName} maps. Used to decide which saved mode
+// (if any) matches the live nodeGroups so the dashboard picker can highlight
+// it. Empty-string and missing keys are treated as "unset".
+function modesEqual(a, b) {
+  const A = a || {}, B = b || {};
+  const ak = Object.keys(A).filter(k => A[k]);
+  const bk = Object.keys(B).filter(k => B[k]);
+  if (ak.length !== bk.length) return false;
+  for (const k of ak) if (A[k] !== B[k]) return false;
+  return true;
 }
 
 // True only when status `b` is strictly worse than `a`. De-escalations and
@@ -308,6 +326,38 @@ function App() {
             <span className="time">{now.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
             <span className="date">{now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</span>
           </div>
+
+          {(settings.modes || []).length > 0 && (() => {
+            const activeMode = (settings.modes || []).find(m => modesEqual(m.groups || {}, settings.nodeGroups || {}));
+            const activeId = activeMode ? activeMode.id : "__custom__";
+            return (
+              <select
+                value={activeId}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  if (id === "__custom__") return;
+                  const m = (settings.modes || []).find(x => x.id === id);
+                  if (m) setSettings(s => ({ ...s, nodeGroups: { ...(m.groups || {}) } }));
+                }}
+                title="Apply a saved node mode"
+                style={{
+                  padding: "5px 10px",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--line)",
+                  background: "var(--surface-2)",
+                  color: "var(--ink)",
+                  fontFamily: "var(--mono)",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  maxWidth: 160,
+                }}
+              >
+                <option value="__custom__">Custom</option>
+                {(settings.modes || []).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+            );
+          })()}
 
           <button
             className={`icon-btn ${settings.theme === "dark" ? "active" : ""}`}

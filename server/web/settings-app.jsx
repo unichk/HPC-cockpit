@@ -26,6 +26,7 @@ const DEFAULT_SETTINGS = {
     gpu:   { nodePowerWarn: 2200, nodePowerHot: 2500 },
   },
   nodeGroups: {},
+  modes: [],
   alarms: {
     enabled: true,
     volume: 0.7,
@@ -43,6 +44,11 @@ const NAV_ITEMS = [
   { id: "alarms", label: "Alarms", icon: (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+    </svg>
+  )},
+  { id: "modes", label: "Node Modes", icon: (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>
     </svg>
   )},
   { id: "thresholds", label: "Thresholds", icon: (
@@ -173,6 +179,11 @@ function mergeWithDefaults(parsed) {
     visibleMetrics: { ...DEFAULT_SETTINGS.visibleMetrics, ...(parsed.visibleMetrics || {}) },
     groupAlerts: ga,
     nodeGroups: { ...(parsed.nodeGroups || {}) },
+    modes: Array.isArray(parsed.modes) ? parsed.modes.map(m => ({
+      id: String(m?.id ?? `mode-${Math.random().toString(36).slice(2, 8)}`),
+      name: String(m?.name ?? "Untitled mode"),
+      groups: (m && typeof m.groups === "object" && m.groups) ? { ...m.groups } : {},
+    })) : [],
     alarms: { ...DEFAULT_SETTINGS.alarms, ...(parsed.alarms || {}) },
   };
 }
@@ -211,6 +222,24 @@ function SettingsApp() {
     fetch("/api/sounds", { cache: "no-store" })
       .then(r => r.ok ? r.json() : { sounds: [] })
       .then(d => { if (!cancelled && Array.isArray(d.sounds)) setSoundFiles(d.sounds); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  // Snapshot of currently-online node IDs so the Modes editor can list them
+  // without waiting for live polling. Combined with IDs already referenced in
+  // settings (nodeGroups + each saved mode) so editing a mode whose nodes are
+  // momentarily offline still works.
+  const [liveNodeIds, setLiveNodeIds] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/nodes", { cache: "no-store" })
+      .then(r => r.ok ? r.json() : { nodes: [] })
+      .then(d => {
+        if (cancelled) return;
+        const ids = Array.isArray(d.nodes) ? d.nodes.map(n => n.node_id).filter(Boolean) : [];
+        setLiveNodeIds(ids);
+      })
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
@@ -379,6 +408,127 @@ function SettingsApp() {
                     <button className="btn-ghost" onClick={() => window.cockpitAlarms?.fireAlarm("warn", { ...alarms, enabled: true })}>⚠ Warn</button>
                     <button className="btn-ghost" onClick={() => window.cockpitAlarms?.fireAlarm("crit", { ...alarms, enabled: true })}>⛔ Crit</button>
                   </SettingRow>
+                </>
+              );
+            })()}
+          </Section>
+
+          <Section id="modes" title="Node Modes" sub="Saved per-node group presets"
+            icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>}
+          >
+            {(() => {
+              const modes = settings.modes || [];
+              const allNodeIds = (() => {
+                const set = new Set(liveNodeIds);
+                Object.keys(settings.nodeGroups || {}).forEach(id => set.add(id));
+                modes.forEach(m => Object.keys(m.groups || {}).forEach(id => set.add(id)));
+                return Array.from(set).sort();
+              })();
+
+              const updateMode = (id, patch) => setSettings(s => ({
+                ...s,
+                modes: (s.modes || []).map(m => m.id === id ? { ...m, ...patch } : m),
+              }));
+              const setMemberGroup = (modeId, nodeId, group) => setSettings(s => ({
+                ...s,
+                modes: (s.modes || []).map(m => {
+                  if (m.id !== modeId) return m;
+                  const groups = { ...(m.groups || {}) };
+                  if (!group) delete groups[nodeId];
+                  else groups[nodeId] = group;
+                  return { ...m, groups };
+                }),
+              }));
+              const deleteMode = (id) => {
+                if (!confirm("Delete this mode?")) return;
+                setSettings(s => ({ ...s, modes: (s.modes || []).filter(m => m.id !== id) }));
+              };
+              const addMode = () => setSettings(s => ({
+                ...s,
+                modes: [
+                  ...(s.modes || []),
+                  {
+                    id: `mode-${Date.now().toString(36)}`,
+                    name: `Mode ${(s.modes || []).length + 1}`,
+                    groups: { ...(s.nodeGroups || {}) },
+                  },
+                ],
+              }));
+              const applyMode = (id) => {
+                const m = (settings.modes || []).find(x => x.id === id);
+                if (!m) return;
+                setSettings(s => ({ ...s, nodeGroups: { ...(m.groups || {}) } }));
+              };
+
+              return (
+                <>
+                  <div className="setting-row" style={{ background: "var(--surface-2)", display: "block" }}>
+                    <div className="setting-label" style={{ marginBottom: 6 }}>
+                      <span className="setting-name">Cluster-wide presets</span>
+                      <span className="setting-desc">
+                        Each mode stores a per-node group assignment. Apply one from the dashboard topbar to switch every node at once. The dashboard shows <code>Custom</code> when the live state doesn't match any saved mode.
+                      </span>
+                    </div>
+                    <button className="btn-primary" onClick={addMode}>+ Add mode</button>
+                  </div>
+
+                  {modes.length === 0 && (
+                    <div className="setting-row" style={{ color: "var(--muted)", fontSize: 12 }}>
+                      No saved modes yet. Click <strong>Add mode</strong> to create one — it'll start from the current per-node group assignments.
+                    </div>
+                  )}
+
+                  {modes.map(mode => (
+                    <div key={mode.id} className="setting-row" style={{ display: "block", padding: "10px 14px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                        <input
+                          type="text"
+                          value={mode.name}
+                          onChange={e => updateMode(mode.id, { name: e.target.value })}
+                          placeholder="Mode name"
+                          style={{
+                            flex: 1, minWidth: 0,
+                            padding: "6px 10px", borderRadius: 6,
+                            border: "1px solid var(--line)",
+                            background: "var(--surface-2)", color: "var(--ink)",
+                            fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700,
+                          }}
+                        />
+                        <button className="btn-ghost" onClick={() => applyMode(mode.id)} title="Overwrite live nodeGroups with this preset">Apply now</button>
+                        <button className="btn-ghost" onClick={() => deleteMode(mode.id)} style={{ color: "var(--crit)" }}>Delete</button>
+                      </div>
+
+                      {allNodeIds.length === 0 ? (
+                        <div style={{ color: "var(--muted)", fontSize: 11, paddingLeft: 4 }}>
+                          No nodes known yet. Once nodes appear they can be assigned here.
+                        </div>
+                      ) : (
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 4 }}>
+                          {allNodeIds.map(nodeId => {
+                            const cur = (mode.groups || {})[nodeId] || "";
+                            return (
+                              <div key={nodeId} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+                                <span style={{ flex: 1, fontFamily: "var(--mono)", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nodeId}</span>
+                                <select
+                                  value={cur}
+                                  onChange={e => setMemberGroup(mode.id, nodeId, e.target.value)}
+                                  style={{
+                                    padding: "3px 6px", borderRadius: 4,
+                                    border: "1px solid var(--line)",
+                                    background: "var(--surface-2)", color: "var(--ink)",
+                                    fontFamily: "var(--mono)", fontSize: 11, fontWeight: 600,
+                                  }}
+                                >
+                                  <option value="">—</option>
+                                  {POWER_GROUPS.map(g => <option key={g.id} value={g.id}>{g.label}</option>)}
+                                </select>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </>
               );
             })()}
