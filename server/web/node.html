@@ -939,110 +939,76 @@
       // command sent to the worker exec channel.
       function shEsc(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 
-      // Common prelude: bash helpers used by every Redfish snippet. Defines
-      // U/P/URL and a getetag() helper that pulls the ETag header from the
-      // most recent saved response. This BMC is strict about If-Match — the
-      // Redfish-spec wildcard "*" is rejected with HTTP 428 — so we always
-      // retrieve a real ETag and retry once if the BMC briefly answers
-      // without it (transient session-pool exhaustion).
-      function redfishPrelude(bmcHost, bmcUser, bmcPass) {
-        const url = `https://${bmcHost}/redfish/v1/Chassis/1/Thermal`;
+      // AMI MegaRAC vendor JSON API session helper. This BMC's Redfish
+      // accepts PATCH on Oem.Public.FanControlMode and Fans[].Oem.Public.
+      // SpeedRatio with HTTP 204, but only the *mode* flip actually wires
+      // through to the fan controller — Fans[].SpeedRatio writes are
+      // silently no-op'd (a known AMI MegaRAC SP-X firmware bug on ODM
+      // builds). To control duty we use the BMC's web-UI API at
+      // /api/settings/fan/N, which requires session-based auth (POST
+      // /api/session → CSRFToken in JSON body + QSESSIONID cookie).
+      //
+      // Probed live on EPYC 9755 + AST BMC + AMI MegaRAC SP-X 13.x:
+      //   PUT /api/settings/fans-mode  body: {"control_mode":"manual"|"auto"}  HTTP 200
+      //   PUT /api/settings/fan/N      body: {"duty":<0..100>}                 HTTP 200
+      // Each /fan/N URL (N=1..6) covers a front+rear sensor pair; 6 slots
+      // total on this chassis. We don't log out — sessions time out on
+      // their own and an explicit DELETE adds no value here.
+      function amiPrelude(bmcHost, bmcUser, bmcPass) {
         return [
           `set -e`,
           `U=${shEsc(bmcUser)}`,
           `P=${shEsc(bmcPass)}`,
-          `URL=${shEsc(url)}`,
-          `HDRS=$(mktemp)`,
-          `trap 'rm -f "$HDRS"' EXIT`,
-          // Read response headers from $HDRS, find ETag (case-insensitive).
-          `getetag() { awk 'BEGIN{IGNORECASE=1} /^etag:/{gsub(/[\\r\\n]/,""); print $2; exit}' "$HDRS"; }`,
-          // GET with header dump; returns body on stdout.
-          `getbody() { curl --connect-timeout 4 -sk -u "$U:$P" -D "$HDRS" -H 'Accept: application/json' "$URL"; }`,
-          // Fetch a fresh ETag. One retry with 1 s sleep handles transient
-          // empty-header responses.
-          `fresh_etag() {`,
-          `  getbody >/dev/null`,
-          `  local e=$(getetag)`,
-          `  if [ -z "$e" ]; then sleep 1; getbody >/dev/null; e=$(getetag); fi`,
-          `  [ -n "$e" ] || { echo "no ETag from BMC (auth failure or session limit?)" >&2; return 1; }`,
-          `  printf '%s' "$e"`,
+          `HOST=${shEsc(`https://${bmcHost}`)}`,
+          `COOKIES=$(mktemp)`,
+          `trap 'rm -f "$COOKIES"' EXIT`,
+          // POST /api/session: form-encoded body, save cookies, capture the
+          // CSRFToken returned in the JSON body.
+          `LOGIN=$(curl --max-time 6 -sk -c "$COOKIES" -X POST \\`,
+          `  -d "username=$U&password=$P" \\`,
+          `  -w '\\n___HTTP %{http_code}___' "$HOST/api/session")`,
+          `echo "$LOGIN" | grep -q '___HTTP 200___' || { echo "BMC login failed (POST /api/session)" >&2; echo "$LOGIN" | head -3 >&2; exit 1; }`,
+          `CSRF=$(echo "$LOGIN" | sed -n 's/.*"CSRFToken":"\\([^"]*\\)".*/\\1/p' | head -1)`,
+          `[ -n "$CSRF" ] || { echo "BMC login response missing CSRFToken" >&2; exit 1; }`,
+          // Helper for state-changing PUTs: args $1=path $2=body.
+          `ami_put() {`,
+          `  local path="$1" body="$2"`,
+          `  local rc=$(curl --max-time 6 -sk -b "$COOKIES" \\`,
+          `    -H "X-CSRFTOKEN: $CSRF" -H 'Content-Type: application/json' \\`,
+          `    -X PUT -d "$body" \\`,
+          `    -o /dev/null -w '%{http_code}' \\`,
+          `    "$HOST$path")`,
+          `  [ "$rc" = "200" ] || { echo "PUT $path -> HTTP $rc" >&2; return 1; }`,
           `}`,
-          // Extract a field from the current Thermal JSON. $1 = sed pattern.
-          `current_mode() { curl --connect-timeout 4 -sk -u "$U:$P" "$URL" | sed -n 's/.*"FanControlMode":"\\([^"]*\\)".*/\\1/p' | head -1; }`,
-          `fan0_speed() { curl --connect-timeout 4 -sk -u "$U:$P" "$URL" | sed -n 's/.*"SpeedRatio":\\([0-9]*\\).*/\\1/p' | head -1; }`,
         ].join("\n");
       }
 
-      // PATCH the Thermal resource with `body`. Returns from the shell with
-      // a non-zero exit if HTTP != 204. Pulls a fresh ETag right before the
-      // PATCH so optimistic-concurrency is always satisfied. `|| exit 1` on
-      // the ETag fetch makes the failure explicit — `set -e` plus command-
-      // substitution doesn't always abort on older bash versions. All error
-      // diagnostics go to stderr so the dashboard's exit-code branch
-      // surfaces them (it shows stderr, falling back to stdout, on failure).
-      function redfishPatch(body) {
+      // Set fan mode via the vendor JSON API.
+      function buildAmiModeCmd({ bmcHost, bmcUser, bmcPass, mode }) {
+        const wire = mode === "manual" ? "manual" : "auto";
         return [
-          `ETAG=$(fresh_etag) || exit 1`,
-          `HTTP=$(curl --connect-timeout 4 -sk -u "$U:$P" -X PATCH \\`,
-          `  -H 'Content-Type: application/json' -H "If-Match: $ETAG" \\`,
-          `  -o /dev/null -w '%{http_code}' \\`,
-          `  -d ${shEsc(body)} "$URL")`,
-          `[ "$HTTP" = "204" ] || { echo "PATCH HTTP $HTTP (body len $(echo -n ${shEsc(body)} | wc -c))" >&2; exit 1; }`,
+          amiPrelude(bmcHost, bmcUser, bmcPass),
+          `ami_put /api/settings/fans-mode ${shEsc(JSON.stringify({control_mode: wire}))}`,
+          `echo "fan mode set to ${wire}"`,
         ].join("\n");
       }
 
-      // Poll for `current_mode` to equal `target` for up to 15 s. The BMC
-      // accepts PATCHes instantly (HTTP 204) but takes 9–12 s to actually
-      // apply them.
-      function redfishPollMode(target) {
-        return [
-          `EXPECT=${shEsc(target)}`,
-          `for i in $(seq 1 15); do`,
-          `  sleep 1`,
-          `  CUR=$(current_mode)`,
-          `  [ "$CUR" = "$EXPECT" ] && break`,
-          `done`,
-          `[ "$CUR" = "$EXPECT" ] || { echo "mode did not propagate to $EXPECT (still '$CUR' after 15s)" >&2; exit 1; }`,
-        ].join("\n");
-      }
-
-      // Build a mode-only PATCH (Auto ↔ Manual). Reports the final mode and
-      // the elapsed propagation time.
-      function buildRedfishModeCmd({ bmcHost, bmcUser, bmcPass, mode }) {
-        return [
-          redfishPrelude(bmcHost, bmcUser, bmcPass),
-          redfishPatch(JSON.stringify({Oem:{Public:{FanControlMode: mode}}})),
-          redfishPollMode(mode),
-          `echo "applied $EXPECT (t+\${i}s)"`,
-        ].join("\n");
-      }
-
-      // Build a duty PATCH. Switches to Manual first if needed (PATCH +
-      // 15 s poll), then PATCHes Fans[] in a separate body. We don't combine
-      // mode + Fans[] in one body because this BMC's firmware silently
-      // rejects (or stale-ETags) the combined update.
-      function buildRedfishDutyCmd({ bmcHost, bmcUser, bmcPass, pct, fanCount }) {
-        const n = fanCount || 12;
-        const fansBody = JSON.stringify({
-          Fans: Array.from({length: n}, (_, i) =>
-            ({MemberId: String(i), Oem:{Public:{SpeedRatio: pct}}})),
-        });
-        return [
-          redfishPrelude(bmcHost, bmcUser, bmcPass),
-          // Step 1: ensure Manual mode.
-          `CUR=$(current_mode)`,
-          `if [ "$CUR" != "Manual" ]; then`,
-          `  echo "switching $CUR -> Manual..."`,
-          redfishPatch(JSON.stringify({Oem:{Public:{FanControlMode:"Manual"}}})).replace(/^/gm, "  "),
-          redfishPollMode("Manual").replace(/^/gm, "  "),
-          `fi`,
-          // Step 2: PATCH all fans' SpeedRatio.
-          redfishPatch(fansBody),
-          // Step 3: read back and report.
-          `sleep 4`,
-          `NOW=$(fan0_speed)`,
-          `echo "set ${pct}% (fan 0 now reads $NOW%)"`,
-        ].join("\n");
+      // Set duty across every fan slot. Always switches to Manual first
+      // (a no-op if already Manual) because the BMC silently ignores duty
+      // writes while in Auto. fanCount is the number of fan sensors (each
+      // slot has front+rear, so slots = fanCount/2). Each /fan/N URL is
+      // 1-indexed.
+      function buildAmiDutyCmd({ bmcHost, bmcUser, bmcPass, pct, fanCount }) {
+        const slots = Math.max(1, Math.floor((fanCount || 12) / 2));
+        const lines = [
+          amiPrelude(bmcHost, bmcUser, bmcPass),
+          `ami_put /api/settings/fans-mode ${shEsc(JSON.stringify({control_mode:"manual"}))}`,
+        ];
+        for (let i = 1; i <= slots; i++) {
+          lines.push(`ami_put /api/settings/fan/${i} ${shEsc(JSON.stringify({duty: pct}))}`);
+        }
+        lines.push(`echo "set ${pct}% across ${slots} fan slot(s)"`);
+        return lines.join("\n");
       }
 
       // Per-vendor IPMI/Redfish fan commands. Each entry returns a shell
@@ -1074,24 +1040,25 @@
           },
           restore: () => `ipmitool raw 0x30 0x30 0x01 0x01\necho "restored auto"`,
         },
-        // Redfish path — for ODM whitebox BMCs that expose AMI MegaRAC's
-        // /redfish/v1/Chassis/1/Thermal with Oem.Public.FanControlMode and
-        // per-fan Oem.Public.SpeedRatio. Validated end-to-end on EPYC 9755 +
-        // AST + AMI MegaRAC SP-X 13.x. setDuty intentionally splits the
-        // mode flip and the Fans[] PATCH into two requests — combining them
-        // into one body trips this BMC's optimistic-concurrency check.
+        // "redfish" — the worker detects ODM whitebox boards by probing
+        // /redfish/v1/Chassis/1/Thermal, but the actual control plane is
+        // the AMI MegaRAC vendor JSON API (POST /api/session for auth,
+        // PUT /api/settings/fans-mode and /api/settings/fan/N). The
+        // Redfish endpoint's Fans[].SpeedRatio PATCH returns HTTP 204
+        // but is a silent no-op on this firmware. Validated end-to-end
+        // on EPYC 9755 + AST + AMI MegaRAC SP-X 13.x.
         redfish: {
-          setMode: (mode, ctx) => buildRedfishModeCmd({
+          setMode: (mode, ctx) => buildAmiModeCmd({
             bmcHost: ctx.bmcHost, bmcUser: ctx.bmcUser, bmcPass: ctx.bmcPass,
-            mode: mode === "manual" ? "Manual" : "Auto",
+            mode: mode === "manual" ? "manual" : "auto",
           }),
-          setDuty: (pct, ctx) => buildRedfishDutyCmd({
+          setDuty: (pct, ctx) => buildAmiDutyCmd({
             bmcHost: ctx.bmcHost, bmcUser: ctx.bmcUser, bmcPass: ctx.bmcPass,
             pct, fanCount: ctx.fanCount,
           }),
-          restore: (_, ctx) => buildRedfishModeCmd({
+          restore: (_, ctx) => buildAmiModeCmd({
             bmcHost: ctx.bmcHost, bmcUser: ctx.bmcUser, bmcPass: ctx.bmcPass,
-            mode: "Auto",
+            mode: "auto",
           }),
         },
       };
@@ -1138,14 +1105,13 @@
           if (!token || busy) return;
           setBusy(true); setResult(null);
           try {
-            // 40 s leaves headroom for the redfish setDuty flow: if mode
-            // is currently Auto we PATCH→Manual (up to 15 s poll) + PATCH
-            // Fans[] + 4 s settle, totalling ~22 s. setMode/restore on their
-            // own complete in ~12 s but share the timeout for simplicity.
+            // 20 s is generous for the redfish/AMI vendor-JSON flow:
+            // login (1 s) + 1 mode PUT + up to 6 fan PUTs (each ~0.5 s) +
+            // overhead = ~5 s typical. setMode/restore are even faster.
             const r = await fetch(`/api/node/${encodeURIComponent(nodeId)}/exec`, {
               method: "POST",
               headers: { "Content-Type": "application/json", "X-Exec-Token": token },
-              body: JSON.stringify({ cmd, timeout_s: 40 }),
+              body: JSON.stringify({ cmd, timeout_s: 20 }),
             });
             const raw = await r.text();
             let body = null;
