@@ -977,7 +977,9 @@
       // a non-zero exit if HTTP != 204. Pulls a fresh ETag right before the
       // PATCH so optimistic-concurrency is always satisfied. `|| exit 1` on
       // the ETag fetch makes the failure explicit — `set -e` plus command-
-      // substitution doesn't always abort on older bash versions.
+      // substitution doesn't always abort on older bash versions. All error
+      // diagnostics go to stderr so the dashboard's exit-code branch
+      // surfaces them (it shows stderr, falling back to stdout, on failure).
       function redfishPatch(body) {
         return [
           `ETAG=$(fresh_etag) || exit 1`,
@@ -985,7 +987,7 @@
           `  -H 'Content-Type: application/json' -H "If-Match: $ETAG" \\`,
           `  -o /dev/null -w '%{http_code}' \\`,
           `  -d ${shEsc(body)} "$URL")`,
-          `[ "$HTTP" = "204" ] || { echo "PATCH HTTP $HTTP"; exit 1; }`,
+          `[ "$HTTP" = "204" ] || { echo "PATCH HTTP $HTTP (body len $(echo -n ${shEsc(body)} | wc -c))" >&2; exit 1; }`,
         ].join("\n");
       }
 
@@ -1000,7 +1002,7 @@
           `  CUR=$(current_mode)`,
           `  [ "$CUR" = "$EXPECT" ] && break`,
           `done`,
-          `[ "$CUR" = "$EXPECT" ] || { echo "mode did not propagate to $EXPECT (still '$CUR' after 15s)"; exit 1; }`,
+          `[ "$CUR" = "$EXPECT" ] || { echo "mode did not propagate to $EXPECT (still '$CUR' after 15s)" >&2; exit 1; }`,
         ].join("\n");
       }
 
@@ -1153,7 +1155,12 @@
             } else if (body && body.error) {
               setResult({ tone: "bad", text: `error: ${body.error}${body.stderr ? ` — ${body.stderr.trim()}` : ""}` });
             } else if (body && typeof body.exit === "number" && body.exit !== 0) {
-              setResult({ tone: "bad", text: `exit=${body.exit}${body.stderr ? ` — ${body.stderr.trim()}` : ""}` });
+              // Show stderr if present; fall back to stdout because some
+              // legacy snippets (Supermicro/Dell ipmitool) print failure
+              // diagnostics to stdout. Without this fallback the user only
+              // sees "exit=1" with no indication of what went wrong.
+              const detail = ((body.stderr || "").trim() || (body.stdout || "").trim());
+              setResult({ tone: "bad", text: `exit=${body.exit}${detail ? ` — ${detail}` : ""}` });
             } else {
               setResult({ tone: "ok", text: (body && (body.stdout || "").trim()) || "done" });
             }
