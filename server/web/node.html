@@ -939,40 +939,107 @@
       // command sent to the worker exec channel.
       function shEsc(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 
-      // Build a Redfish PATCH-and-poll shell snippet for the AMI MegaRAC
-      // /Chassis/1/Thermal endpoint. The BMC accepts the PATCH (HTTP 204)
-      // instantly but takes ~9-12 s to actually apply it, so the snippet
-      // polls the resource for up to 15 s and reports the final state.
-      // Optimistic concurrency: GET ETag first, send it as If-Match (falling
-      // back to "*" if the BMC doesn't return one).
-      function buildRedfishPatchCmd({ bmcHost, bmcUser, bmcPass, body, expect }) {
+      // Common prelude: bash helpers used by every Redfish snippet. Defines
+      // U/P/URL and a getetag() helper that pulls the ETag header from the
+      // most recent saved response. This BMC is strict about If-Match — the
+      // Redfish-spec wildcard "*" is rejected with HTTP 428 — so we always
+      // retrieve a real ETag and retry once if the BMC briefly answers
+      // without it (transient session-pool exhaustion).
+      function redfishPrelude(bmcHost, bmcUser, bmcPass) {
         const url = `https://${bmcHost}/redfish/v1/Chassis/1/Thermal`;
         return [
           `set -e`,
           `U=${shEsc(bmcUser)}`,
           `P=${shEsc(bmcPass)}`,
           `URL=${shEsc(url)}`,
-          `BODY=${shEsc(body)}`,
-          `ETAG=$(curl --connect-timeout 4 -sk -u "$U:$P" -D - -o /dev/null "$URL" | awk 'tolower($1)=="etag:"{sub(/\\r$/,"",$2); print $2; exit}')`,
-          `[ -z "$ETAG" ] && ETAG='*'`,
+          `HDRS=$(mktemp)`,
+          `trap 'rm -f "$HDRS"' EXIT`,
+          // Read response headers from $HDRS, find ETag (case-insensitive).
+          `getetag() { awk 'BEGIN{IGNORECASE=1} /^etag:/{gsub(/[\\r\\n]/,""); print $2; exit}' "$HDRS"; }`,
+          // GET with header dump; returns body on stdout.
+          `getbody() { curl --connect-timeout 4 -sk -u "$U:$P" -D "$HDRS" -H 'Accept: application/json' "$URL"; }`,
+          // Fetch a fresh ETag. One retry with 1 s sleep handles transient
+          // empty-header responses.
+          `fresh_etag() {`,
+          `  getbody >/dev/null`,
+          `  local e=$(getetag)`,
+          `  if [ -z "$e" ]; then sleep 1; getbody >/dev/null; e=$(getetag); fi`,
+          `  [ -n "$e" ] || { echo "no ETag from BMC (auth failure or session limit?)" >&2; return 1; }`,
+          `  printf '%s' "$e"`,
+          `}`,
+          // Extract a field from the current Thermal JSON. $1 = sed pattern.
+          `current_mode() { curl --connect-timeout 4 -sk -u "$U:$P" "$URL" | sed -n 's/.*"FanControlMode":"\\([^"]*\\)".*/\\1/p' | head -1; }`,
+          `fan0_speed() { curl --connect-timeout 4 -sk -u "$U:$P" "$URL" | sed -n 's/.*"SpeedRatio":\\([0-9]*\\).*/\\1/p' | head -1; }`,
+        ].join("\n");
+      }
+
+      // PATCH the Thermal resource with `body`. Returns from the shell with
+      // a non-zero exit if HTTP != 204. Pulls a fresh ETag right before the
+      // PATCH so optimistic-concurrency is always satisfied. `|| exit 1` on
+      // the ETag fetch makes the failure explicit — `set -e` plus command-
+      // substitution doesn't always abort on older bash versions.
+      function redfishPatch(body) {
+        return [
+          `ETAG=$(fresh_etag) || exit 1`,
           `HTTP=$(curl --connect-timeout 4 -sk -u "$U:$P" -X PATCH \\`,
           `  -H 'Content-Type: application/json' -H "If-Match: $ETAG" \\`,
-          `  -o /dev/null -w '%{http_code}' -d "$BODY" "$URL")`,
+          `  -o /dev/null -w '%{http_code}' \\`,
+          `  -d ${shEsc(body)} "$URL")`,
           `[ "$HTTP" = "204" ] || { echo "PATCH HTTP $HTTP"; exit 1; }`,
-          // Poll up to 15 s for the change to propagate.
-          `EXPECT=${shEsc(expect)}`,
+        ].join("\n");
+      }
+
+      // Poll for `current_mode` to equal `target` for up to 15 s. The BMC
+      // accepts PATCHes instantly (HTTP 204) but takes 9–12 s to actually
+      // apply them.
+      function redfishPollMode(target) {
+        return [
+          `EXPECT=${shEsc(target)}`,
           `for i in $(seq 1 15); do`,
           `  sleep 1`,
-          `  CUR=$(curl --connect-timeout 4 -sk -u "$U:$P" "$URL" | sed -n 's/.*"FanControlMode":"\\([^"]*\\)".*/\\1/p' | head -1)`,
-          `  if [ -n "$EXPECT" ]; then`,
-          `    [ "$CUR" = "$EXPECT" ] && { echo "applied $CUR (t+\${i}s)"; exit 0; }`,
-          `  fi`,
+          `  CUR=$(current_mode)`,
+          `  [ "$CUR" = "$EXPECT" ] && break`,
           `done`,
-          `if [ -n "$EXPECT" ] && [ "$CUR" != "$EXPECT" ]; then`,
-          `  echo "PATCH accepted (HTTP 204) but mode still reads '$CUR' after 15 s"`,
-          `else`,
-          `  echo "applied (mode=$CUR)"`,
+          `[ "$CUR" = "$EXPECT" ] || { echo "mode did not propagate to $EXPECT (still '$CUR' after 15s)"; exit 1; }`,
+        ].join("\n");
+      }
+
+      // Build a mode-only PATCH (Auto ↔ Manual). Reports the final mode and
+      // the elapsed propagation time.
+      function buildRedfishModeCmd({ bmcHost, bmcUser, bmcPass, mode }) {
+        return [
+          redfishPrelude(bmcHost, bmcUser, bmcPass),
+          redfishPatch(JSON.stringify({Oem:{Public:{FanControlMode: mode}}})),
+          redfishPollMode(mode),
+          `echo "applied $EXPECT (t+\${i}s)"`,
+        ].join("\n");
+      }
+
+      // Build a duty PATCH. Switches to Manual first if needed (PATCH +
+      // 15 s poll), then PATCHes Fans[] in a separate body. We don't combine
+      // mode + Fans[] in one body because this BMC's firmware silently
+      // rejects (or stale-ETags) the combined update.
+      function buildRedfishDutyCmd({ bmcHost, bmcUser, bmcPass, pct, fanCount }) {
+        const n = fanCount || 12;
+        const fansBody = JSON.stringify({
+          Fans: Array.from({length: n}, (_, i) =>
+            ({MemberId: String(i), Oem:{Public:{SpeedRatio: pct}}})),
+        });
+        return [
+          redfishPrelude(bmcHost, bmcUser, bmcPass),
+          // Step 1: ensure Manual mode.
+          `CUR=$(current_mode)`,
+          `if [ "$CUR" != "Manual" ]; then`,
+          `  echo "switching $CUR -> Manual..."`,
+          redfishPatch(JSON.stringify({Oem:{Public:{FanControlMode:"Manual"}}})).replace(/^/gm, "  "),
+          redfishPollMode("Manual").replace(/^/gm, "  "),
           `fi`,
+          // Step 2: PATCH all fans' SpeedRatio.
+          redfishPatch(fansBody),
+          // Step 3: read back and report.
+          `sleep 4`,
+          `NOW=$(fan0_speed)`,
+          `echo "set ${pct}% (fan 0 now reads $NOW%)"`,
         ].join("\n");
       }
 
@@ -1008,31 +1075,21 @@
         // Redfish path — for ODM whitebox BMCs that expose AMI MegaRAC's
         // /redfish/v1/Chassis/1/Thermal with Oem.Public.FanControlMode and
         // per-fan Oem.Public.SpeedRatio. Validated end-to-end on EPYC 9755 +
-        // AST + AMI MegaRAC SP-X 13.x.
+        // AST + AMI MegaRAC SP-X 13.x. setDuty intentionally splits the
+        // mode flip and the Fans[] PATCH into two requests — combining them
+        // into one body trips this BMC's optimistic-concurrency check.
         redfish: {
-          setMode: (mode, ctx) => buildRedfishPatchCmd({
+          setMode: (mode, ctx) => buildRedfishModeCmd({
             bmcHost: ctx.bmcHost, bmcUser: ctx.bmcUser, bmcPass: ctx.bmcPass,
-            body: JSON.stringify({Oem:{Public:{FanControlMode: mode === "manual" ? "Manual" : "Auto"}}}),
-            expect: mode === "manual" ? "Manual" : "Auto",
+            mode: mode === "manual" ? "Manual" : "Auto",
           }),
-          // setDuty PATCHes every fan's SpeedRatio in a single body, also
-          // flipping the mode to Manual (otherwise the BMC overrides duty
-          // with its auto curve). fanCount defaults to 12 — adjust if the
-          // chassis has more/fewer fan headers.
-          setDuty: (pct, ctx) => {
-            const n = ctx.fanCount || 12;
-            const fans = Array.from({length: n}, (_, i) =>
-              ({MemberId: String(i), Oem:{Public:{SpeedRatio: pct}}}));
-            return buildRedfishPatchCmd({
-              bmcHost: ctx.bmcHost, bmcUser: ctx.bmcUser, bmcPass: ctx.bmcPass,
-              body: JSON.stringify({Oem:{Public:{FanControlMode:"Manual"}}, Fans: fans}),
-              expect: "Manual",
-            });
-          },
-          restore: (_, ctx) => buildRedfishPatchCmd({
+          setDuty: (pct, ctx) => buildRedfishDutyCmd({
             bmcHost: ctx.bmcHost, bmcUser: ctx.bmcUser, bmcPass: ctx.bmcPass,
-            body: JSON.stringify({Oem:{Public:{FanControlMode:"Auto"}}}),
-            expect: "Auto",
+            pct, fanCount: ctx.fanCount,
+          }),
+          restore: (_, ctx) => buildRedfishModeCmd({
+            bmcHost: ctx.bmcHost, bmcUser: ctx.bmcUser, bmcPass: ctx.bmcPass,
+            mode: "Auto",
           }),
         },
       };
@@ -1079,13 +1136,14 @@
           if (!token || busy) return;
           setBusy(true); setResult(null);
           try {
-            // 25 s leaves enough headroom for the redfish setMode/setDuty
-            // shell snippet, which polls the BMC for up to 15 s after the
-            // PATCH (propagation lag) plus the actual HTTP round-trips.
+            // 40 s leaves headroom for the redfish setDuty flow: if mode
+            // is currently Auto we PATCH→Manual (up to 15 s poll) + PATCH
+            // Fans[] + 4 s settle, totalling ~22 s. setMode/restore on their
+            // own complete in ~12 s but share the timeout for simplicity.
             const r = await fetch(`/api/node/${encodeURIComponent(nodeId)}/exec`, {
               method: "POST",
               headers: { "Content-Type": "application/json", "X-Exec-Token": token },
-              body: JSON.stringify({ cmd, timeout_s: 25 }),
+              body: JSON.stringify({ cmd, timeout_s: 40 }),
             });
             const raw = await r.text();
             let body = null;
