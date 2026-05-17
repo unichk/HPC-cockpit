@@ -986,31 +986,43 @@
         ].join("\n");
       }
 
-      // Set fan mode via the vendor JSON API.
+      // Set fan mode via the vendor JSON API. We always send BOTH
+      // control_mode and cooling_mode because the BMC's web UI does
+      // (captured Content-Length: 49 = both fields), and setting only
+      // control_mode leaves cooling_mode pinned at "normal" so subsequent
+      // duty PUTs are silently dropped.
       function buildAmiModeCmd({ bmcHost, bmcUser, bmcPass, mode }) {
         const wire = mode === "manual" ? "manual" : "auto";
+        const coolingWire = mode === "manual" ? "manual" : "normal";
+        const body = JSON.stringify({control_mode: wire, cooling_mode: coolingWire});
         return [
           amiPrelude(bmcHost, bmcUser, bmcPass),
-          `ami_put /api/settings/fans-mode ${shEsc(JSON.stringify({control_mode: wire}))}`,
+          `ami_put /api/settings/fans-mode ${shEsc(body)}`,
           `echo "fan mode set to ${wire}"`,
         ].join("\n");
       }
 
-      // Set duty across every fan slot. Always switches to Manual first
-      // (a no-op if already Manual) because the BMC silently ignores duty
-      // writes while in Auto. fanCount is the number of fan sensors (each
-      // slot has front+rear, so slots = fanCount/2). Each /fan/N URL is
-      // 1-indexed.
+      // Set duty across every fan sensor. /api/settings/fan/N is 1-indexed
+      // and addresses individual sensors (NOT front/rear pairs as the URL
+      // shape might suggest) — confirmed by users reporting "only first 6
+      // fans changed" when we iterated N=1..fanCount/2. Now we loop N=1..
+      // fanCount so all FAN[0..5]_F and FAN[0..5]_R get set.
+      //
+      // Always include cooling_mode=manual alongside control_mode=manual:
+      // the BMC web UI sends both, and setting control_mode alone leaves
+      // cooling_mode pinned at "normal" (BMC auto curve still active),
+      // which makes the BMC reject subsequent duty PUTs with HTTP 500
+      // "Error in setting fan duty" code 1454.
       function buildAmiDutyCmd({ bmcHost, bmcUser, bmcPass, pct, fanCount }) {
-        const slots = Math.max(1, Math.floor((fanCount || 12) / 2));
+        const sensors = Math.max(1, fanCount || 12);
         const lines = [
           amiPrelude(bmcHost, bmcUser, bmcPass),
-          `ami_put /api/settings/fans-mode ${shEsc(JSON.stringify({control_mode:"manual"}))}`,
+          `ami_put /api/settings/fans-mode ${shEsc(JSON.stringify({control_mode:"manual", cooling_mode:"manual"}))}`,
         ];
-        for (let i = 1; i <= slots; i++) {
+        for (let i = 1; i <= sensors; i++) {
           lines.push(`ami_put /api/settings/fan/${i} ${shEsc(JSON.stringify({duty: pct}))}`);
         }
-        lines.push(`echo "set ${pct}% across ${slots} fan slot(s)"`);
+        lines.push(`echo "set ${pct}% across ${sensors} fan sensor(s)"`);
         return lines.join("\n");
       }
 
