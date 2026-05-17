@@ -7,6 +7,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <iomanip>
 #include <sstream>
 #include <string>
 
@@ -26,6 +27,9 @@ std::string EscapeJson(const std::string& input) {
 
 std::string SnapshotToJson(const Snapshot& snapshot) {
   std::ostringstream line;
+  // 15 sig digits round-trips memory totals (long long → double) without
+  // truncation; default stream precision of 6 caused e.g. 8388604 → 8388600.
+  line << std::setprecision(15);
   line << "{\"node_id\":\"" << EscapeJson(snapshot.node_id) << "\",\"timestamp_ms\":"
        << snapshot.timestamp_ms << ",\"metrics\":[";
   for (std::size_t index = 0; index < snapshot.metrics.size(); ++index) {

@@ -8,8 +8,11 @@ const KB_PER_GIB = 1024 * 1024;
 // CPU governor encoding must mirror cpu_collector.cpp's GovernorCode().
 const GOVERNOR_NAMES = [null, "performance", "powersave", "schedutil", "ondemand", "conservative", "userspace"];
 
-// Fan/chassis vendor encoding must mirror fan_collector.cpp's DetectFanVendor().
-const FAN_VENDOR_NAMES = [null, "supermicro", "dell", "hpe", "inventec"];
+// Fan/chassis vendor encoding must mirror fan_collector.cpp's DetectVendor().
+// Code 5 ("redfish") is not a hardware vendor — it's a fallback for ODM
+// whitebox boards whose BMC exposes an AMI MegaRAC-style Redfish Thermal
+// resource with a writable Oem.Public.FanControlMode field.
+const FAN_VENDOR_NAMES = [null, "supermicro", "dell", "hpe", "inventec", "redfish"];
 
 function fanVendorName(code) {
   const c = code | 0;
@@ -294,6 +297,7 @@ function mapNode(raw, nowMs) {
   const cpuFreqCapKhz = pickNum(idx, "cpu.freq_cap_khz");
   const cpuFreqMinKhz = pickNum(idx, "cpu.freq_min_khz");
   const cpuFreqMaxKhz = pickNum(idx, "cpu.freq_max_khz");
+  const cpuFreqBiosLimitKhz = pickNum(idx, "cpu.freq_bios_limit_khz");
   const cpuGovernorCode = pickNum(idx, "cpu.governor_code");
   const cpuGovernorsMask = pickNum(idx, "cpu.governors_mask");
   const cpuCoreCount = pickNum(idx, "cpu.core_count") | 0;
@@ -315,6 +319,13 @@ function mapNode(raw, nowMs) {
   const fanOk = pickNum(idx, "fan.ok_count");
   const fanRpm = pickNum(idx, "fan.avg_rpm");
   const fanVendorCode = pickNum(idx, "fan.vendor_code");
+  // Worker packs IPv4 into a single uint32: octets in [31:24], [23:16], [15:8], [7:0].
+  // We use >>> 0 to coerce to unsigned (JS bit-ops are signed 32-bit), then
+  // bit-extract. Empty/0 means no BMC IP discovered → leave host falsy.
+  const bmcIpPacked = pickNum(idx, "fan.bmc_ipv4_packed") >>> 0;
+  const bmcHost = bmcIpPacked > 0
+    ? `${(bmcIpPacked >>> 24) & 255}.${(bmcIpPacked >>> 16) & 255}.${(bmcIpPacked >>> 8) & 255}.${bmcIpPacked & 255}`
+    : "";
 
   let gpuCount = pickNum(idx, "gpu.count") | 0;
   let gpuVendor = gpuVendorName(pickNum(idx, "gpu.vendor_code"));
@@ -394,6 +405,7 @@ function mapNode(raw, nowMs) {
     fanTotal: fanCount,
     fanRpm,
     fanVendor: fanVendorName(fanVendorCode),
+    bmcHost,
     perFan: perFanRpms(raw.metrics),
     gpuCount,
     gpuVendor,
@@ -410,6 +422,7 @@ function mapNode(raw, nowMs) {
     cpuFreqMhz: cpuFreqCapKhz > 0 ? cpuFreqCapKhz / 1000 : 0,
     cpuFreqMinMhz: cpuFreqMinKhz > 0 ? cpuFreqMinKhz / 1000 : 0,
     cpuFreqMaxMhz: cpuFreqMaxKhz > 0 ? cpuFreqMaxKhz / 1000 : 0,
+    cpuFreqBiosLimitMhz: cpuFreqBiosLimitKhz > 0 ? cpuFreqBiosLimitKhz / 1000 : 0,
     cpuGovernor: governorName(cpuGovernorCode),
     cpuGovernorsAvailable: governorsFromMask(cpuGovernorsMask),
     cpuCoreCount,

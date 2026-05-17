@@ -16,7 +16,14 @@ namespace {
 // DMI chassis vendor → numeric code. Mirrors FAN_VENDOR_NAMES in
 // server/web/live-data.js; the UI uses the code to pick which IPMI OEM
 // opcodes to send from FAN_CMDS in node.html.
-int DetectFanVendor() {
+//
+// Code 5 ("redfish") is special: it's not a hardware vendor but a fallback
+// path for ODM whitebox boards that don't fill DMI strings (sys_vendor reads
+// "NULL") but expose an AMI MegaRAC-style Redfish endpoint at
+// /redfish/v1/Chassis/1/Thermal with a writable Oem.Public.FanControlMode.
+// Detected by probing the BMC LAN IP for a 200/401 response (401 means
+// "exists but needs auth" — exactly what we want; the UI sends auth itself).
+int DetectDmiFanVendor() {
   std::ifstream in("/sys/class/dmi/id/sys_vendor");
   if (!in.is_open()) return 0;
   std::string line;
@@ -111,12 +118,85 @@ std::string SanitizeName(const std::string& value) {
   return clean;
 }
 
+// Run `ipmitool lan print <ch>` and return the first non-zero IPv4 address it
+// reports. AMI MegaRAC BMCs typically expose the dedicated management port as
+// channel 1 (static IP) and a shared NCSI port as channel 8 (DHCP) — we walk
+// both and prefer the first reachable one. Returns "" on failure.
+std::string DiscoverBmcIp() {
+  for (int ch : {1, 8, 2, 3}) {
+    std::string output;
+    const std::string cmd = "ipmitool lan print " + std::to_string(ch) + " 2>/dev/null";
+    if (!RunCommand(cmd.c_str(), output)) continue;
+    std::istringstream stream(output);
+    std::string line;
+    while (std::getline(stream, line)) {
+      // The line we want is "IP Address              : 10.16.120.101"
+      // with several spaces between "Address" and ":". The "Source" line
+      // ("IP Address Source : DHCP Address") is *not* what we want — match
+      // on "IP Address " followed by enough spaces to distinguish.
+      const auto pos = line.find("IP Address ");
+      if (pos == std::string::npos) continue;
+      // Reject "IP Address Source:" line (contains "Source" before colon).
+      if (line.find("Source") != std::string::npos &&
+          line.find("Source") < line.find(':')) continue;
+      const auto colon = line.find(':');
+      if (colon == std::string::npos) continue;
+      const std::string addr = Trim(line.substr(colon + 1));
+      // Accept anything that parses as a non-zero IPv4.
+      unsigned a = 0, b = 0, c = 0, d = 0;
+      if (std::sscanf(addr.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4 &&
+          (a | b | c | d) != 0 && a < 256 && b < 256 && c < 256 && d < 256) {
+        return addr;
+      }
+    }
+  }
+  return "";
+}
+
+// Pack dotted IPv4 into a single 32-bit integer (10.16.120.101 → 0x0A107865).
+// JS decodes via [(n>>>24)&255, (n>>>16)&255, (n>>>8)&255, n&255].join('.').
+double Ipv4ToPacked(const std::string& addr) {
+  unsigned a = 0, b = 0, c = 0, d = 0;
+  if (std::sscanf(addr.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return 0.0;
+  // Use unsigned long long arithmetic to avoid the high bit of a*2^24 going
+  // negative on signed int multiplication.
+  const unsigned long long packed = (static_cast<unsigned long long>(a) << 24) |
+                                    (static_cast<unsigned long long>(b) << 16) |
+                                    (static_cast<unsigned long long>(c) << 8)  |
+                                     static_cast<unsigned long long>(d);
+  return static_cast<double>(packed);
+}
+
+// Probe whether the BMC at `ip` exposes an AMI MegaRAC-style Redfish Thermal
+// resource. We don't authenticate — the goal is just to confirm reachability.
+// HTTP 401 ("unauthorized") is the success signal: the endpoint exists and
+// expects credentials, which the UI supplies at PATCH time. HTTP 200 (some
+// firmware leaves it unauth-readable) also counts. Any other response or a
+// curl failure means "no Redfish here".
+bool ProbeRedfish(const std::string& ip) {
+  if (ip.empty()) return false;
+  std::string output;
+  const std::string cmd =
+      "curl --connect-timeout 3 --max-time 5 -sk -o /dev/null "
+      "-w '%{http_code}' https://" + ip + "/redfish/v1/Chassis/1/Thermal "
+      "2>/dev/null";
+  if (!RunCommand(cmd.c_str(), output)) return false;
+  const std::string code = Trim(output);
+  return code == "401" || code == "200";
+}
+
 class FanCollector : public Collector {
  public:
   std::string Name() const override { return "fan"; }
 
   bool Collect(std::vector<Metric>& out, std::string& error) override {
     out.push_back(Metric{"fan", "vendor_code", static_cast<double>(vendor_code_), "enum"});
+    if (bmc_ipv4_packed_ > 0.0) {
+      // 32-bit packed IPv4 (big-endian). UI decodes:
+      //   const a = (n>>>24)&255, b = (n>>>16)&255, c = (n>>>8)&255, d = n&255
+      // and uses it as the Redfish base URL.
+      out.push_back(Metric{"fan", "bmc_ipv4_packed", bmc_ipv4_packed_, "uint32"});
+    }
 
     std::string payload;
     if (!RunCommand("ipmi-sensors --sensor-type=Fan 2>&1", payload)) {
@@ -198,8 +278,20 @@ class FanCollector : public Collector {
   }
 
  private:
+  // Run BMC discovery once at construction (each call shells out to ipmitool +
+  // curl, so we don't want to repeat on every collect). The result is reported
+  // verbatim in every Collect() so the UI always has it.
+  static int DetectVendor(const std::string& bmc_ip) {
+    const int dmi = DetectDmiFanVendor();
+    if (dmi != 0) return dmi;
+    if (ProbeRedfish(bmc_ip)) return 5;  // redfish fallback
+    return 0;
+  }
+
   bool last_available_ = true;
-  int vendor_code_ = DetectFanVendor();
+  std::string bmc_ip_ = DiscoverBmcIp();
+  double bmc_ipv4_packed_ = Ipv4ToPacked(bmc_ip_);
+  int vendor_code_ = DetectVendor(bmc_ip_);
 };
 
 }  // namespace

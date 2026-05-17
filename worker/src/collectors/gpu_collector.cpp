@@ -1,25 +1,28 @@
-// GPU collector — AMD ROCm primary, NVIDIA secondary.
+// GPU collector — AMD via sysfs (amdgpu kernel driver), NVIDIA via nvidia-smi.
 //
-// NOTE: UNTESTED — the dev cluster (Inventec F6IVT) has no GPU. Every
-// rocm-smi / nvidia-smi shell-out and its associated parser is marked
-// with "UNTESTED" so the whole GPU code path is grep-findable on first
-// boot against real hardware. Before trusting the numbers:
-//   1. Run /tmp/probe_gpu.sh (read-only) on the target machine to dump the
-//      raw CLI output this collector parses.
-//   2. Sanity-check that column order / units match the parsers below.
-//   3. Only then try the tuning commands in server/web/node.html's
-//      GPU_CMDS table.
+// The AMD path reads directly from /sys/class/drm/cardN/device/ rather than
+// shelling out to rocm-smi. Reasons:
+//   - rocm-smi's CSV output format varies wildly across ROCm releases.
+//   - Some deployments saw rocm-smi --csv emit rows for only a subset of
+//     visible GPUs (cgroup/visibility edge cases), so an 8-GPU node would
+//     show full data for only 2 cards. sysfs always reflects every card the
+//     amdgpu driver bound to, with no external dependency.
+//   - sysfs values are documented and stable since Linux 4.x.
 //
-// The collector stays completely silent when no GPU is present: if both
-// rocm-smi and nvidia-smi are missing or return zero GPUs, it emits only
-// gpu.count=0 and returns, so the current GPU-less cluster sees no UI.
+// The NVIDIA path still uses nvidia-smi (no equivalent sysfs surface).
+//
+// The collector stays completely silent when no GPU is present: gpu.count=0
+// and gpu.vendor_code=0, and no per-GPU rows.
 
 #include "collector.h"
+
+#include <dirent.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdio>
+#include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -90,19 +93,89 @@ bool ParseNumber(const std::string& raw, double& out) {
   return !ss.fail();
 }
 
-// NOTE: UNTESTED — expected to print one line per AMD GPU like:
-//   GPU[0]		: GPU ID: 0x7312
-//   GPU[1]		: GPU ID: 0x7312
-int CountAmdGpus() {
-  std::string out;
-  if (!RunCommandSoft("rocm-smi --showid 2>/dev/null", out)) return 0;
-  int count = 0;
-  std::istringstream ss(out);
-  std::string line;
-  while (std::getline(ss, line)) {
-    if (line.rfind("GPU[", 0) == 0) ++count;
+// Enumerate AMD GPU card indices from sysfs. A "card" is any
+// /sys/class/drm/cardN entry whose device/vendor file reads "0x1002" (AMD).
+// Returned indices are the kernel's PCI-enumeration order, sorted ascending.
+std::vector<int> ListAmdCards() {
+  std::vector<int> out;
+  DIR* dir = opendir("/sys/class/drm");
+  if (!dir) return out;
+  struct dirent* ent;
+  while ((ent = readdir(dir)) != nullptr) {
+    const std::string name = ent->d_name;
+    // Match cardN strictly — exclude renderD*, controlD*, etc.
+    if (name.size() < 5 || name.compare(0, 4, "card") != 0) continue;
+    bool all_digits = true;
+    for (std::size_t i = 4; i < name.size(); ++i) {
+      if (!std::isdigit(static_cast<unsigned char>(name[i]))) { all_digits = false; break; }
+    }
+    if (!all_digits) continue;
+
+    std::string vendor;
+    std::ifstream vin("/sys/class/drm/" + name + "/device/vendor");
+    if (vin.is_open()) std::getline(vin, vendor);
+    if (vendor != "0x1002") continue;
+
+    try { out.push_back(std::stoi(name.substr(4))); } catch (...) {}
   }
-  return std::min(count, kMaxGpus);
+  closedir(dir);
+  std::sort(out.begin(), out.end());
+  if (static_cast<int>(out.size()) > kMaxGpus) out.resize(kMaxGpus);
+  return out;
+}
+
+int CountAmdGpus() { return static_cast<int>(ListAmdCards().size()); }
+
+// Find the hwmon subdir under /sys/class/drm/cardN/device/hwmon/. The amdgpu
+// driver creates exactly one hwmonM directory per card, but the M is
+// system-wide, so we have to scan.
+std::string FindHwmonDir(const std::string& card_path) {
+  const std::string base = card_path + "/device/hwmon";
+  DIR* dir = opendir(base.c_str());
+  if (!dir) return "";
+  struct dirent* ent;
+  std::string found;
+  while ((ent = readdir(dir)) != nullptr) {
+    const std::string name = ent->d_name;
+    if (name.compare(0, 5, "hwmon") == 0 && name.size() > 5) {
+      found = base + "/" + name;
+      break;
+    }
+  }
+  closedir(dir);
+  return found;
+}
+
+bool ReadSysfsDouble(const std::string& path, double& out) {
+  std::ifstream in(path);
+  if (!in.is_open()) return false;
+  in >> out;
+  return !in.fail();
+}
+
+// Parse pp_dpm_sclk for the currently-active DPM level. Format:
+//   0: 200Mhz
+//   1: 700Mhz
+//   2: 1500Mhz *      <- "*" marks the active level
+bool ReadActiveSclkMhz(const std::string& card_path, double& out_mhz) {
+  std::ifstream in(card_path + "/device/pp_dpm_sclk");
+  if (!in.is_open()) return false;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.find('*') == std::string::npos) continue;
+    const std::size_t mhz_pos = line.find("Mhz");
+    if (mhz_pos == std::string::npos) continue;
+    std::size_t start = mhz_pos;
+    while (start > 0 && std::isdigit(static_cast<unsigned char>(line[start - 1]))) --start;
+    if (start >= mhz_pos) continue;
+    try {
+      out_mhz = std::stod(line.substr(start, mhz_pos - start));
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+  return false;
 }
 
 // NOTE: UNTESTED — `nvidia-smi -L` prints one "GPU 0: <name> (UUID...)" per card.
@@ -179,126 +252,64 @@ void QueryNvidia(std::vector<GpuSample>& samples) {
   }
 }
 
-// NOTE: UNTESTED — rocm-smi CSV mode emits a header row and one row per GPU.
-// The exact column names vary between ROCm releases, so we parse by header
-// name rather than position. Flags tried (combined in one call for speed):
-//   --showtemp       → "Temperature (Sensor edge) (C)"
-//   --showuse        → "GPU use (%)"
-//   --showpower      → "Average Graphics Package Power (W)"
-//   --showmaxpower   → "Max Graphics Package Power (W)"
-//   --showmeminfo vram → "VRAM Total Memory (B)" / "VRAM Total Used Memory (B)"
-//   --showclocks     → "sclk clock speed: (XMhz)" and similar — plain text, NOT
-//                      CSV-friendly. We fall back to --showclocks parsed
-//                      line-by-line when the CSV headers don't contain it.
+// Read every AMD GPU's metrics directly from sysfs. Each field is per-card
+// independent: missing files just leave that field unset (has_X stays false)
+// so partial data still gets reported.
 //
-// If header names on your ROCm release differ from the substrings below, add
-// aliases in the `header_is(...)` calls rather than relying on position.
-void QueryAmd(std::vector<GpuSample>& samples, int amd_count) {
-  std::string csv_out;
-  const char* csv_cmd =
-      "rocm-smi --showtemp --showuse --showpower --showmaxpower "
-      "--showmeminfo vram --csv 2>/dev/null";
-  const bool have_csv = RunCommand(csv_cmd, csv_out);
+// sysfs surface (provided by the in-tree amdgpu driver):
+//   /sys/class/drm/cardN/device/hwmon/hwmonM/temp1_input    millidegree C
+//   /sys/class/drm/cardN/device/hwmon/hwmonM/power1_average microwatts (avg)
+//   /sys/class/drm/cardN/device/hwmon/hwmonM/power1_input   microwatts (alt)
+//   /sys/class/drm/cardN/device/hwmon/hwmonM/power1_cap     microwatts
+//   /sys/class/drm/cardN/device/gpu_busy_percent            0..100
+//   /sys/class/drm/cardN/device/mem_info_vram_total         bytes
+//   /sys/class/drm/cardN/device/mem_info_vram_used          bytes
+//   /sys/class/drm/cardN/device/pp_dpm_sclk                 active level "*"
+void QueryAmd(std::vector<GpuSample>& samples) {
+  const auto cards = ListAmdCards();
+  for (std::size_t logical = 0; logical < cards.size(); ++logical) {
+    const int card_id = cards[logical];
+    const std::string card_path = "/sys/class/drm/card" + std::to_string(card_id);
+    const std::string hwmon = FindHwmonDir(card_path);
 
-  // Seed samples for all AMD GPUs we know about, so we can fill them
-  // partially even if CSV parsing doesn't yield every field.
-  std::vector<GpuSample> locals(amd_count);
-  for (int i = 0; i < amd_count; ++i) {
-    locals[i].index = i;
-    locals[i].vendor = kVendorAmd;
-  }
+    GpuSample g;
+    g.index = static_cast<int>(logical);
+    g.vendor = kVendorAmd;
 
-  if (have_csv) {
-    std::istringstream ss(csv_out);
-    std::string line;
-    std::vector<std::string> headers;
-    bool got_header = false;
-    while (std::getline(ss, line)) {
-      const std::string t = Trim(line);
-      if (t.empty()) continue;
-      const auto fields = SplitChar(t, ',');
-      if (!got_header) {
-        headers = fields;
-        got_header = true;
-        continue;
+    double v = 0.0;
+    if (!hwmon.empty()) {
+      if (ReadSysfsDouble(hwmon + "/temp1_input", v)) {
+        g.temp_c = v / 1000.0;
+        g.has_temp = true;
       }
-      if (fields.empty()) continue;
-
-      // First column is a device name like "card0" or "GPU0". Walk backward
-      // to find the trailing run of digits; that's the device index.
-      int dev_idx = -1;
-      {
-        const std::string& dev = fields[0];
-        std::size_t end = dev.size();
-        while (end > 0 && std::isdigit(static_cast<unsigned char>(dev[end - 1]))) --end;
-        if (end < dev.size()) {
-          try { dev_idx = std::stoi(dev.substr(end)); } catch (...) { dev_idx = -1; }
-        }
+      if (ReadSysfsDouble(hwmon + "/power1_average", v) ||
+          ReadSysfsDouble(hwmon + "/power1_input", v)) {
+        g.power_w = v / 1000000.0;
+        g.has_power = true;
       }
-      if (dev_idx < 0 || dev_idx >= amd_count) continue;
-
-      auto header_has = [&](std::size_t col, std::initializer_list<const char*> needles) {
-        if (col >= headers.size()) return false;
-        const std::string& h = headers[col];
-        for (const char* n : needles) if (h.find(n) != std::string::npos) return true;
-        return false;
-      };
-
-      for (std::size_t c = 1; c < fields.size() && c < headers.size(); ++c) {
-        double v;
-        if (!ParseNumber(fields[c], v)) continue;
-        GpuSample& g = locals[dev_idx];
-        if (header_has(c, {"Temperature", "edge"})) {
-          g.temp_c = v; g.has_temp = true;
-        } else if (header_has(c, {"GPU use", "GPU Use"})) {
-          g.util_percent = v; g.has_util = true;
-        } else if (header_has(c, {"Average Graphics Package Power", "Average Socket Power"})) {
-          g.power_w = v; g.has_power = true;
-        } else if (header_has(c, {"Max Graphics Package Power"})) {
-          g.power_cap_w = v; g.has_cap = true;
-        } else if (header_has(c, {"VRAM Total Memory"})) {
-          g.mem_total_mb = v / (1024.0 * 1024.0); g.has_mem = true;
-        } else if (header_has(c, {"VRAM Total Used Memory"})) {
-          g.mem_used_mb = v / (1024.0 * 1024.0);
-        }
+      if (ReadSysfsDouble(hwmon + "/power1_cap", v)) {
+        g.power_cap_w = v / 1000000.0;
+        g.has_cap = true;
       }
     }
-  }
-
-  // NOTE: UNTESTED — clock speed from --showclocks is plain text, not CSV.
-  // Typical line: "GPU[0]		: sclk clock speed: (800Mhz)"
-  std::string clk_out;
-  if (RunCommandSoft("rocm-smi --showclocks 2>/dev/null", clk_out)) {
-    std::istringstream ss(clk_out);
-    std::string line;
-    while (std::getline(ss, line)) {
-      // Look for "GPU[N]" prefix and "sclk clock speed: (XXXMhz)"
-      const auto open = line.find("GPU[");
-      if (open == std::string::npos) continue;
-      const auto close = line.find("]", open);
-      if (close == std::string::npos) continue;
-      int idx = 0;
-      for (auto i = open + 4; i < close; ++i) {
-        if (!std::isdigit(static_cast<unsigned char>(line[i]))) { idx = -1; break; }
-        idx = idx * 10 + (line[i] - '0');
-      }
-      if (idx < 0 || idx >= amd_count) continue;
-      const auto tag = line.find("sclk");
-      if (tag == std::string::npos) continue;
-      const auto lparen = line.find("(", tag);
-      const auto rparen = line.find("Mhz", tag);
-      if (lparen == std::string::npos || rparen == std::string::npos || rparen <= lparen + 1) continue;
-      const std::string num = line.substr(lparen + 1, rparen - lparen - 1);
-      double mhz;
-      if (ParseNumber(num, mhz)) {
-        locals[idx].clock_mhz = mhz;
-        locals[idx].has_clock = true;
-      }
+    if (ReadSysfsDouble(card_path + "/device/gpu_busy_percent", v)) {
+      g.util_percent = v;
+      g.has_util = true;
     }
-  }
+    double mem_total = 0.0, mem_used = 0.0;
+    if (ReadSysfsDouble(card_path + "/device/mem_info_vram_total", mem_total) &&
+        ReadSysfsDouble(card_path + "/device/mem_info_vram_used", mem_used)) {
+      g.mem_total_mb = mem_total / (1024.0 * 1024.0);
+      g.mem_used_mb = mem_used / (1024.0 * 1024.0);
+      g.has_mem = true;
+    }
+    double mhz = 0.0;
+    if (ReadActiveSclkMhz(card_path, mhz)) {
+      g.clock_mhz = mhz;
+      g.has_clock = true;
+    }
 
-  for (auto& g : locals) {
-    if (g.index >= 0) samples.push_back(g);
+    samples.push_back(g);
   }
 }
 
@@ -320,7 +331,7 @@ class GpuCollector : public Collector {
 
     std::vector<GpuSample> samples;
     samples.reserve(count);
-    if (amd_count_ > 0) QueryAmd(samples, amd_count_);
+    if (amd_count_ > 0) QueryAmd(samples);
     if (nvidia_count_ > 0) QueryNvidia(samples);
 
     // Emit per-GPU metrics. Per-collect re-indexing isn't needed because both

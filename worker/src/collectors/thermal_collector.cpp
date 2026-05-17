@@ -83,10 +83,35 @@ class ThermalCollector : public Collector {
         continue;
       }
 
+      // Intel CPU: coretemp-*  ->  "Package id 0:  +52.0°C"
       if (StartsWith(section, "coretemp-") && line.find("Package id ") != std::string::npos) {
         std::smatch match;
         if (std::regex_search(line, match, temp_regex)) {
           cpu_packages.push_back(std::stod(match[1].str()));
+        }
+        continue;
+      }
+
+      // AMD CPU: k10temp-* (in-tree) or zenpower-* (out-of-tree). Both expose
+      // Tctl (control temp, what the firmware uses for fan curves) and on
+      // newer kernels Tdie (the actual die temp, slightly lower). Prefer Tdie
+      // when present; fall back to Tctl. One package reading per socket.
+      if (StartsWith(section, "k10temp-") || StartsWith(section, "zenpower-")) {
+        const std::string trimmed = Trim(line);
+        const bool is_tdie = StartsWith(trimmed, "Tdie:");
+        const bool is_tctl = StartsWith(trimmed, "Tctl:");
+        if (is_tdie || is_tctl) {
+          std::smatch match;
+          if (std::regex_search(line, match, temp_regex)) {
+            const double value = std::stod(match[1].str());
+            // Prefer Tdie if both appear for the same section: replace any
+            // Tctl we already pushed for this section when Tdie arrives next.
+            if (is_tdie && !cpu_packages.empty()) {
+              cpu_packages.back() = value;
+            } else {
+              cpu_packages.push_back(value);
+            }
+          }
         }
         continue;
       }
@@ -99,9 +124,20 @@ class ThermalCollector : public Collector {
         continue;
       }
 
-      if ((StartsWith(section, "mlx") || StartsWith(section, "nic") ||
-           StartsWith(section, "ethernet") || section.find("-nic-") != std::string::npos) &&
-          line.find(':') != std::string::npos) {
+      // NIC temp sensors. Common section prefixes:
+      //   mlx4-/mlx5-       Mellanox/NVIDIA ConnectX
+      //   i350bb-, igb-     Intel i350/igb-driver NICs
+      //   ixgbe-, ice-      Intel 10G/100G NICs
+      //   bnxt-, bnx2x-     Broadcom NetXtreme
+      // We also match generic "nic" / "ethernet" sections and any section
+      // containing "-nic-" for whitebox boards.
+      const bool is_nic_section =
+          StartsWith(section, "mlx") || StartsWith(section, "nic") ||
+          StartsWith(section, "ethernet") || section.find("-nic-") != std::string::npos ||
+          StartsWith(section, "i350") || StartsWith(section, "igb-") ||
+          StartsWith(section, "ixgbe-") || StartsWith(section, "ice-") ||
+          StartsWith(section, "bnxt") || StartsWith(section, "bnx2x");
+      if (is_nic_section && line.find(':') != std::string::npos) {
         std::smatch match;
         if (std::regex_search(line, match, temp_regex)) {
           nic_temps.push_back(std::stod(match[1].str()));

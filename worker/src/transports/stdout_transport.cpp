@@ -1,5 +1,6 @@
 #include "transport.h"
 
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 
@@ -23,6 +24,9 @@ class StdoutTransport : public Transport {
 
   bool Send(const Snapshot& snapshot, std::string&) override {
     std::ostringstream line;
+    // 15 sig digits round-trips memory totals (long long → double) without
+    // truncation; default stream precision of 6 caused e.g. 8388604 → 8388600.
+    line << std::setprecision(15);
     line << "{\"node_id\":\"" << EscapeJson(snapshot.node_id) << "\",\"timestamp_ms\":"
          << snapshot.timestamp_ms << ",\"metrics\":[";
 

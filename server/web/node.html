@@ -394,8 +394,15 @@
         const [tokenDraft, setTokenDraft] = useState("");
         const [editingToken, setEditingToken] = useState(() => !sessionStorage.getItem("cockpit_exec_token"));
         const minMhz = node.cpuFreqMinMhz > 0 ? Math.round(node.cpuFreqMinMhz) : 0;
-        const maxMhz = node.cpuFreqMaxMhz > 0 ? Math.round(node.cpuFreqMaxMhz) : 0;
+        const siliconMaxMhz = node.cpuFreqMaxMhz > 0 ? Math.round(node.cpuFreqMaxMhz) : 0;
+        const biosLimitMhz = node.cpuFreqBiosLimitMhz > 0 ? Math.round(node.cpuFreqBiosLimitMhz) : 0;
+        // bios_limit is what the kernel will actually honor for scaling_max_freq
+        // writes. cpuinfo_max_freq is just the silicon's boost ceiling; on most
+        // HPC nodes the BMC clamps below that, so use bios_limit as the input
+        // bound when present.
+        const maxMhz = biosLimitMhz > 0 ? Math.min(siliconMaxMhz || biosLimitMhz, biosLimitMhz) : siliconMaxMhz;
         const haveRange = minMhz > 0 && maxMhz > 0 && maxMhz >= minMhz;
+        const biosClampActive = biosLimitMhz > 0 && siliconMaxMhz > 0 && biosLimitMhz < siliconMaxMhz;
         const fallbackGovs = ["performance", "powersave", "schedutil", "ondemand", "conservative", "userspace"];
         const availableGovs = (node.cpuGovernorsAvailable && node.cpuGovernorsAvailable.length > 0) ? node.cpuGovernorsAvailable : fallbackGovs;
         const [customMhz, setCustomMhz] = useState("");
@@ -464,9 +471,18 @@
           runExec(cmd).then(() => {
             setResult(prev => {
               if (!prev || prev.tone !== "ok") return prev;
-              const cap = parseInt((prev.text || "").trim(), 10);
-              const capTxt = Number.isFinite(cap) ? ` (cap ${Math.round(cap/1000)} MHz)` : "";
-              return { tone: "ok", text: `applied ${mhz} MHz${capTxt}` };
+              const capKhz = parseInt((prev.text || "").trim(), 10);
+              if (!Number.isFinite(capKhz)) {
+                return { tone: "ok", text: `applied ${mhz} MHz` };
+              }
+              const capMhz = Math.round(capKhz / 1000);
+              // Kernel silently clamps writes above bios_limit. If the readback
+              // is meaningfully below the request, the write didn't take.
+              if (Math.abs(capMhz - mhz) > 5) {
+                const reason = biosLimitMhz > 0 && capMhz <= biosLimitMhz + 5 ? " (BIOS limit)" : "";
+                return { tone: "warn", text: `clamped to ${capMhz} MHz${reason} — requested ${mhz}` };
+              }
+              return { tone: "ok", text: `applied ${capMhz} MHz` };
             });
           });
         }
@@ -544,6 +560,12 @@
                       </>
                     : <em>frequency data unavailable on this node</em>}
                 </div>
+                {biosClampActive && (
+                  <div style={{ fontSize: 11, color: "var(--warn)", fontFamily: "var(--mono)" }}>
+                    BIOS caps scaling at {formatMhz(biosLimitMhz)} (silicon boost ceiling {formatMhz(siliconMaxMhz)}).
+                    Writes above the cap get silently clamped by the kernel.
+                  </div>
+                )}
 
                 {editingToken ? (
                   <div className="nd-shell-tokenrow" style={{ margin: 0 }}>
@@ -598,8 +620,12 @@
 
                 {result && (
                   <div style={{ fontFamily: "var(--mono)", fontSize: 12, padding: "6px 10px", borderRadius: 6,
-                    background: result.tone === "bad" ? "color-mix(in oklab, var(--crit) 12%, var(--surface-2))" : "color-mix(in oklab, var(--ok) 10%, var(--surface-2))",
-                    color: result.tone === "bad" ? "var(--crit)" : "var(--ink)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    background: result.tone === "bad" ? "color-mix(in oklab, var(--crit) 12%, var(--surface-2))"
+                              : result.tone === "warn" ? "color-mix(in oklab, var(--warn) 12%, var(--surface-2))"
+                              : "color-mix(in oklab, var(--ok) 10%, var(--surface-2))",
+                    color: result.tone === "bad" ? "var(--crit)"
+                         : result.tone === "warn" ? "var(--warn)"
+                         : "var(--ink)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                     {result.text}
                   </div>
                 )}
@@ -883,8 +909,12 @@
 
                 {result && (
                   <div style={{ fontFamily: "var(--mono)", fontSize: 12, padding: "6px 10px", borderRadius: 6,
-                    background: result.tone === "bad" ? "color-mix(in oklab, var(--crit) 12%, var(--surface-2))" : "color-mix(in oklab, var(--ok) 10%, var(--surface-2))",
-                    color: result.tone === "bad" ? "var(--crit)" : "var(--ink)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    background: result.tone === "bad" ? "color-mix(in oklab, var(--crit) 12%, var(--surface-2))"
+                              : result.tone === "warn" ? "color-mix(in oklab, var(--warn) 12%, var(--surface-2))"
+                              : "color-mix(in oklab, var(--ok) 10%, var(--surface-2))",
+                    color: result.tone === "bad" ? "var(--crit)"
+                         : result.tone === "warn" ? "var(--warn)"
+                         : "var(--ink)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                     {result.text}
                   </div>
                 )}
@@ -904,10 +934,53 @@
         );
       }
 
-      // Per-vendor IPMI OEM fan commands. Each entry returns a shell command
-      // string for the exec channel. Vendors absent from this table trigger
-      // the "not supported" banner in FanModal; no command is sent.
-      // To add Inventec/HPE later, drop verified opcodes in here.
+      // Single-quote-escape a value for inclusion inside a Bash single-quoted
+      // string. Required because BMC credentials get embedded in the shell
+      // command sent to the worker exec channel.
+      function shEsc(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+
+      // Build a Redfish PATCH-and-poll shell snippet for the AMI MegaRAC
+      // /Chassis/1/Thermal endpoint. The BMC accepts the PATCH (HTTP 204)
+      // instantly but takes ~9-12 s to actually apply it, so the snippet
+      // polls the resource for up to 15 s and reports the final state.
+      // Optimistic concurrency: GET ETag first, send it as If-Match (falling
+      // back to "*" if the BMC doesn't return one).
+      function buildRedfishPatchCmd({ bmcHost, bmcUser, bmcPass, body, expect }) {
+        const url = `https://${bmcHost}/redfish/v1/Chassis/1/Thermal`;
+        return [
+          `set -e`,
+          `U=${shEsc(bmcUser)}`,
+          `P=${shEsc(bmcPass)}`,
+          `URL=${shEsc(url)}`,
+          `BODY=${shEsc(body)}`,
+          `ETAG=$(curl --connect-timeout 4 -sk -u "$U:$P" -D - -o /dev/null "$URL" | awk 'tolower($1)=="etag:"{sub(/\\r$/,"",$2); print $2; exit}')`,
+          `[ -z "$ETAG" ] && ETAG='*'`,
+          `HTTP=$(curl --connect-timeout 4 -sk -u "$U:$P" -X PATCH \\`,
+          `  -H 'Content-Type: application/json' -H "If-Match: $ETAG" \\`,
+          `  -o /dev/null -w '%{http_code}' -d "$BODY" "$URL")`,
+          `[ "$HTTP" = "204" ] || { echo "PATCH HTTP $HTTP"; exit 1; }`,
+          // Poll up to 15 s for the change to propagate.
+          `EXPECT=${shEsc(expect)}`,
+          `for i in $(seq 1 15); do`,
+          `  sleep 1`,
+          `  CUR=$(curl --connect-timeout 4 -sk -u "$U:$P" "$URL" | sed -n 's/.*"FanControlMode":"\\([^"]*\\)".*/\\1/p' | head -1)`,
+          `  if [ -n "$EXPECT" ]; then`,
+          `    [ "$CUR" = "$EXPECT" ] && { echo "applied $CUR (t+\${i}s)"; exit 0; }`,
+          `  fi`,
+          `done`,
+          `if [ -n "$EXPECT" ] && [ "$CUR" != "$EXPECT" ]; then`,
+          `  echo "PATCH accepted (HTTP 204) but mode still reads '$CUR' after 15 s"`,
+          `else`,
+          `  echo "applied (mode=$CUR)"`,
+          `fi`,
+        ].join("\n");
+      }
+
+      // Per-vendor IPMI/Redfish fan commands. Each entry returns a shell
+      // command string for the exec channel. Vendors absent from this table
+      // trigger the "not supported" banner in FanModal; no command is sent.
+      // setMode/setDuty/restore receive (args, ctx) — supermicro/dell ignore
+      // ctx; redfish uses ctx.{bmcHost,bmcUser,bmcPass,fanCount}.
       const FAN_CMDS = {
         supermicro: {
           setMode: (mode) => `ipmitool raw 0x30 0x45 0x01 ${mode === "manual" ? "0x01" : "0x00"}\necho ok`,
@@ -932,12 +1005,50 @@
           },
           restore: () => `ipmitool raw 0x30 0x30 0x01 0x01\necho "restored auto"`,
         },
+        // Redfish path — for ODM whitebox BMCs that expose AMI MegaRAC's
+        // /redfish/v1/Chassis/1/Thermal with Oem.Public.FanControlMode and
+        // per-fan Oem.Public.SpeedRatio. Validated end-to-end on EPYC 9755 +
+        // AST + AMI MegaRAC SP-X 13.x.
+        redfish: {
+          setMode: (mode, ctx) => buildRedfishPatchCmd({
+            bmcHost: ctx.bmcHost, bmcUser: ctx.bmcUser, bmcPass: ctx.bmcPass,
+            body: JSON.stringify({Oem:{Public:{FanControlMode: mode === "manual" ? "Manual" : "Auto"}}}),
+            expect: mode === "manual" ? "Manual" : "Auto",
+          }),
+          // setDuty PATCHes every fan's SpeedRatio in a single body, also
+          // flipping the mode to Manual (otherwise the BMC overrides duty
+          // with its auto curve). fanCount defaults to 12 — adjust if the
+          // chassis has more/fewer fan headers.
+          setDuty: (pct, ctx) => {
+            const n = ctx.fanCount || 12;
+            const fans = Array.from({length: n}, (_, i) =>
+              ({MemberId: String(i), Oem:{Public:{SpeedRatio: pct}}}));
+            return buildRedfishPatchCmd({
+              bmcHost: ctx.bmcHost, bmcUser: ctx.bmcUser, bmcPass: ctx.bmcPass,
+              body: JSON.stringify({Oem:{Public:{FanControlMode:"Manual"}}, Fans: fans}),
+              expect: "Manual",
+            });
+          },
+          restore: (_, ctx) => buildRedfishPatchCmd({
+            bmcHost: ctx.bmcHost, bmcUser: ctx.bmcUser, bmcPass: ctx.bmcPass,
+            body: JSON.stringify({Oem:{Public:{FanControlMode:"Auto"}}}),
+            expect: "Auto",
+          }),
+        },
       };
 
       function FanModal({ nodeId, node, onClose }) {
         const [token, setToken] = useState(() => sessionStorage.getItem("cockpit_exec_token") || "");
         const [tokenDraft, setTokenDraft] = useState("");
         const [editingToken, setEditingToken] = useState(() => !sessionStorage.getItem("cockpit_exec_token"));
+        // BMC credentials — only needed for the redfish path. Stored in
+        // sessionStorage so the user types them once per browser tab.
+        const [bmcUser, setBmcUser] = useState(() => sessionStorage.getItem("cockpit_bmc_user") || "");
+        const [bmcPass, setBmcPass] = useState(() => sessionStorage.getItem("cockpit_bmc_pass") || "");
+        const [bmcUserDraft, setBmcUserDraft] = useState("");
+        const [bmcPassDraft, setBmcPassDraft] = useState("");
+        const [editingBmc, setEditingBmc] = useState(() =>
+          !(sessionStorage.getItem("cockpit_bmc_user") && sessionStorage.getItem("cockpit_bmc_pass")));
         const [mode, setMode] = useState("auto");
         const [customPct, setCustomPct] = useState("");
         const [busy, setBusy] = useState(false);
@@ -946,6 +1057,10 @@
         const vendor = node.fanVendor || "unknown";
         const cmds = FAN_CMDS[vendor];
         const supported = !!cmds;
+        const needsBmcCreds = vendor === "redfish";
+        const haveBmcCreds = !!(bmcUser && bmcPass);
+        const bmcReady = !needsBmcCreds || (haveBmcCreds && node.bmcHost);
+        const ctx = { bmcHost: node.bmcHost, bmcUser, bmcPass, fanCount: node.fanTotal };
 
         useEffect(() => {
           const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -964,10 +1079,13 @@
           if (!token || busy) return;
           setBusy(true); setResult(null);
           try {
+            // 25 s leaves enough headroom for the redfish setMode/setDuty
+            // shell snippet, which polls the BMC for up to 15 s after the
+            // PATCH (propagation lag) plus the actual HTTP round-trips.
             const r = await fetch(`/api/node/${encodeURIComponent(nodeId)}/exec`, {
               method: "POST",
               headers: { "Content-Type": "application/json", "X-Exec-Token": token },
-              body: JSON.stringify({ cmd, timeout_s: 15 }),
+              body: JSON.stringify({ cmd, timeout_s: 25 }),
             });
             const raw = await r.text();
             let body = null;
@@ -988,21 +1106,32 @@
           }
         }
 
+        function saveBmcCreds() {
+          const u = bmcUserDraft.trim();
+          const p = bmcPassDraft;  // don't trim password
+          if (!u || !p) return;
+          sessionStorage.setItem("cockpit_bmc_user", u);
+          sessionStorage.setItem("cockpit_bmc_pass", p);
+          setBmcUser(u); setBmcPass(p);
+          setBmcUserDraft(""); setBmcPassDraft("");
+          setEditingBmc(false);
+        }
+
         function applyMode() {
-          if (!supported) return;
-          runExec(cmds.setMode(mode));
+          if (!supported || !bmcReady) return;
+          runExec(cmds.setMode(mode, ctx));
         }
 
         function applyDuty() {
-          if (!supported) return;
+          if (!supported || !bmcReady) return;
           const pct = parseInt(customPct, 10);
           if (!Number.isFinite(pct) || pct < 1 || pct > 100) return;
-          runExec(cmds.setDuty(pct));
+          runExec(cmds.setDuty(pct, ctx));
         }
 
         function restoreAuto() {
-          if (!supported) return;
-          runExec(cmds.restore());
+          if (!supported || !bmcReady) return;
+          runExec(cmds.restore(null, ctx));
         }
 
         const presets = [20, 40, 60, 80, 100];
@@ -1036,7 +1165,16 @@
                     background: "color-mix(in oklab, var(--warn) 12%, var(--surface-2))",
                     color: "var(--ink)", border: "1px solid color-mix(in oklab, var(--warn) 40%, var(--line))", lineHeight: 1.5 }}>
                     <div style={{ fontWeight: 700, marginBottom: 4, color: "var(--warn)" }}>Fan tuning is not supported on this platform.</div>
-                    Detected vendor: <b>{vendorLabel}</b>. This card ships with verified IPMI OEM fan commands only for Supermicro and Dell. To enable tuning here, add the correct <code>ipmitool raw …</code> opcodes to the <code>FAN_CMDS</code> table in <code>server/web/node.html</code>.
+                    Detected vendor: <b>{vendorLabel}</b>. <code>FAN_CMDS</code> in <code>server/web/node.html</code> currently covers Supermicro, Dell, and Redfish (AMI MegaRAC-style). To enable tuning on other hardware, add the right <code>ipmitool raw …</code> opcodes there.
+                  </div>
+                )}
+
+                {supported && vendor === "redfish" && !node.bmcHost && (
+                  <div style={{ fontSize: 12, padding: "10px 12px", borderRadius: 6,
+                    background: "color-mix(in oklab, var(--warn) 12%, var(--surface-2))",
+                    color: "var(--ink)", border: "1px solid color-mix(in oklab, var(--warn) 40%, var(--line))", lineHeight: 1.5 }}>
+                    <div style={{ fontWeight: 700, marginBottom: 4, color: "var(--warn)" }}>BMC IP not yet discovered.</div>
+                    The worker hasn't reported a BMC management IP for this node. Check that <code>ipmitool lan print 1</code> returns a valid address as root, then restart <code>hpc-worker</code>.
                   </div>
                 )}
 
@@ -1056,6 +1194,24 @@
                   </div>
                 )}
 
+                {needsBmcCreds && (editingBmc ? (
+                  <div className="nd-shell-tokenrow" style={{ margin: 0, gap: 6 }}>
+                    <span className="lbl">BMC</span>
+                    <input type="text" value={bmcUserDraft} onChange={e => setBmcUserDraft(e.target.value)}
+                      placeholder="user (e.g. admin)" autoFocus style={{ flex: "1 1 100px" }} />
+                    <input type="password" value={bmcPassDraft} onChange={e => setBmcPassDraft(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && saveBmcCreds()}
+                      placeholder="password" style={{ flex: "1 1 140px" }} />
+                    <button onClick={saveBmcCreds} disabled={!bmcUserDraft.trim() || !bmcPassDraft}>Save</button>
+                  </div>
+                ) : (
+                  <div className="nd-shell-tokenrow" style={{ margin: 0 }}>
+                    <span className="lbl">BMC</span>
+                    <span style={{ flex: 1, fontFamily: "var(--mono)", fontSize: 12, color: "var(--muted)" }}>{bmcUser} @ {node.bmcHost || "?"} · ••••••• (session)</span>
+                    <span className="change" onClick={() => { setEditingBmc(true); setBmcUserDraft(bmcUser); setBmcPassDraft(""); }}>[change]</span>
+                  </div>
+                ))}
+
                 <div>
                   <div style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>Mode</div>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -1064,7 +1220,7 @@
                       <option value="auto">Auto (BMC-controlled)</option>
                       <option value="manual">Manual (override)</option>
                     </select>
-                    <button className="nd-freq-btn" onClick={applyMode} disabled={!supported || !token || busy}>Set mode</button>
+                    <button className="nd-freq-btn" onClick={applyMode} disabled={!supported || !token || !bmcReady || busy}>Set mode</button>
                   </div>
                 </div>
 
@@ -1085,22 +1241,26 @@
                       disabled={!supported}
                       placeholder="% (1–100)" min={1} max={100}
                       style={{ ...inputStyle, opacity: supported ? 1 : 0.5 }} />
-                    <button className="nd-freq-btn" onClick={applyDuty} disabled={!supported || !token || busy || !pctValid}>Apply</button>
+                    <button className="nd-freq-btn" onClick={applyDuty} disabled={!supported || !token || !bmcReady || busy || !pctValid}>Apply</button>
                   </div>
                 </div>
 
                 {result && (
                   <div style={{ fontFamily: "var(--mono)", fontSize: 12, padding: "6px 10px", borderRadius: 6,
-                    background: result.tone === "bad" ? "color-mix(in oklab, var(--crit) 12%, var(--surface-2))" : "color-mix(in oklab, var(--ok) 10%, var(--surface-2))",
-                    color: result.tone === "bad" ? "var(--crit)" : "var(--ink)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    background: result.tone === "bad" ? "color-mix(in oklab, var(--crit) 12%, var(--surface-2))"
+                              : result.tone === "warn" ? "color-mix(in oklab, var(--warn) 12%, var(--surface-2))"
+                              : "color-mix(in oklab, var(--ok) 10%, var(--surface-2))",
+                    color: result.tone === "bad" ? "var(--crit)"
+                         : result.tone === "warn" ? "var(--warn)"
+                         : "var(--ink)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                     {result.text}
                   </div>
                 )}
 
                 {supported && (
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--line)", paddingTop: 10 }}>
-                    <span onClick={busy ? undefined : restoreAuto}
-                      style={{ fontSize: 11, color: busy ? "var(--muted)" : "var(--accent)", cursor: busy ? "default" : "pointer", textDecoration: "underline", textDecorationStyle: "dotted" }}>
+                    <span onClick={(busy || !bmcReady) ? undefined : restoreAuto}
+                      style={{ fontSize: 11, color: (busy || !bmcReady) ? "var(--muted)" : "var(--accent)", cursor: (busy || !bmcReady) ? "default" : "pointer", textDecoration: "underline", textDecorationStyle: "dotted" }}>
                       Restore (re-enable auto control)
                     </span>
                     <span style={{ fontSize: 10, color: "var(--muted)" }}>

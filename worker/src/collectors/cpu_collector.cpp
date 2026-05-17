@@ -50,14 +50,21 @@ void CollectCpufreq(std::vector<Metric>& out) {
   // The "cap" is the current scaling_max_freq — what the governor is allowed
   // to run up to. We report that instead of scaling_cur_freq (instantaneous,
   // load-dependent) so the UI reflects the configured ceiling.
-  long cap_khz = 0, min_khz = 0, max_khz = 0;
+  long cap_khz = 0, min_khz = 0, max_khz = 0, bios_khz = 0;
   const bool have_cap = ReadSysfsLong(base + "scaling_max_freq", cap_khz);
   const bool have_min = ReadSysfsLong(base + "cpuinfo_min_freq", min_khz);
   const bool have_max = ReadSysfsLong(base + "cpuinfo_max_freq", max_khz);
+  // bios_limit reflects firmware/BMC-imposed clamps that the kernel honors
+  // when writing scaling_max_freq. On HPC nodes it's often well below
+  // cpuinfo_max_freq (e.g. base clock with boost disabled in BIOS), and
+  // attempts to scale above it get silently clipped. The UI uses this to
+  // bound the freq-control input and to label clamps clearly.
+  const bool have_bios = ReadSysfsLong(base + "bios_limit", bios_khz);
 
   if (have_cap) out.push_back(Metric{"cpu", "freq_cap_khz", static_cast<double>(cap_khz), "khz"});
   if (have_min) out.push_back(Metric{"cpu", "freq_min_khz", static_cast<double>(min_khz), "khz"});
   if (have_max) out.push_back(Metric{"cpu", "freq_max_khz", static_cast<double>(max_khz), "khz"});
+  if (have_bios) out.push_back(Metric{"cpu", "freq_bios_limit_khz", static_cast<double>(bios_khz), "khz"});
 
   std::string gov;
   if (ReadSysfsFirstToken(base + "scaling_governor", gov)) {

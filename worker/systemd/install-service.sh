@@ -56,6 +56,38 @@ run_cmd() {
   fi
 }
 
+# Validate that a binary on disk is actually a usable worker binary. We saw an
+# incident where build.sh exited 0 but left a 0-byte file at build/hpc_worker;
+# the previous installer happily copied it over /usr/local/bin/hpc_worker
+# (which had been deleted by clean-reinstall a moment earlier), leaving the
+# service permanently in 203/EXEC restart-loop. Three layers of check:
+#   1. file exists (-f)
+#   2. file is non-empty (-s) — catches truncated/interrupted linker output
+#   3. file is an ELF executable — catches scripts/text/wrong-arch copies
+# Caller is expected to abort on non-zero return.
+validate_binary() {
+  local path="$1" label="${2:-binary}"
+  if [[ ! -f "$path" ]]; then
+    echo "error: ${label} not found: $path" >&2
+    return 1
+  fi
+  if [[ ! -s "$path" ]]; then
+    echo "error: ${label} is empty (0 bytes): $path" >&2
+    echo "       this usually means a stale CMake cache; rerun:" >&2
+    echo "         rm -rf '$(dirname "$path")' && '${BUILD_SCRIPT}'" >&2
+    return 1
+  fi
+  if ! file -b "$path" 2>/dev/null | grep -q 'ELF.*executable'; then
+    echo "error: ${label} at $path is not a valid ELF executable" >&2
+    file -b "$path" >&2 || true
+    return 1
+  fi
+  if [[ ! -x "$path" ]]; then
+    echo "error: ${label} at $path is not marked executable" >&2
+    return 1
+  fi
+}
+
 refresh_ipmi_cache() {
   local cache_dir="/root/.freeipmi/sdr-cache"
   if ${DRY_RUN}; then
@@ -143,9 +175,11 @@ if ! ${SKIP_BUILD}; then
   fi
 fi
 
-if [[ ! -x "${BIN_SRC}" ]]; then
-  echo "error: worker binary not found or not executable: ${BIN_SRC}"
-  exit 2
+# Validate the source binary BEFORE doing anything destructive. If the binary
+# is bad we want to abort while the current install is still working — never
+# stop/remove the running service until we know the replacement is usable.
+if ! ${DRY_RUN}; then
+  validate_binary "${BIN_SRC}" "source worker binary" || exit 2
 fi
 
 if [[ ! -f "${CONFIG_SRC}" ]]; then
@@ -171,7 +205,21 @@ if ${CLEAN_REINSTALL}; then
 fi
 
 run_cmd mkdir -p "${CONFIG_DIR}" "${STATE_DIR}"
-run_cmd install -m 0755 "${BIN_SRC}" "${BIN_DST}"
+# Two-step atomic binary install: write the new file to a sibling .new path
+# (same filesystem, so rename is atomic), validate it, then mv into place.
+# This means a partial copy or a fault between bytes never leaves the system
+# with a half-written /usr/local/bin/hpc_worker.
+if ${DRY_RUN}; then
+  echo "[dry-run] install -m 0755 ${BIN_SRC} ${BIN_DST}.new && mv ${BIN_DST}.new ${BIN_DST}"
+else
+  install -m 0755 "${BIN_SRC}" "${BIN_DST}.new"
+  validate_binary "${BIN_DST}.new" "newly-installed worker binary" || {
+    rm -f "${BIN_DST}.new"
+    echo "error: post-copy validation failed; leaving ${BIN_DST} untouched" >&2
+    exit 3
+  }
+  mv -f "${BIN_DST}.new" "${BIN_DST}"
+fi
 run_cmd install -m 0644 "${SERVICE_SRC}" "${UNIT_DST}"
 run_cmd install -m 0644 "${CONFIG_SRC}" "${CONFIG_DST}"
 refresh_ipmi_cache
