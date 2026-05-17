@@ -968,8 +968,11 @@
           `  -d "username=$U&password=$P" \\`,
           `  -w '\\n___HTTP %{http_code}___' "$HOST/api/session")`,
           `echo "$LOGIN" | grep -q '___HTTP 200___' || { echo "BMC login failed (POST /api/session)" >&2; echo "$LOGIN" | head -3 >&2; exit 1; }`,
-          `CSRF=$(echo "$LOGIN" | sed -n 's/.*"CSRFToken":"\\([^"]*\\)".*/\\1/p' | head -1)`,
-          `[ -n "$CSRF" ] || { echo "BMC login response missing CSRFToken" >&2; exit 1; }`,
+          // Some firmware revisions return the JSON with whitespace after
+          // the colon ('"CSRFToken": "..."') and others omit it. Allow
+          // optional spaces/tabs between the colon and the opening quote.
+          `CSRF=$(echo "$LOGIN" | sed -n 's/.*"CSRFToken"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1)`,
+          `[ -n "$CSRF" ] || { echo "BMC login response missing CSRFToken" >&2; echo "$LOGIN" | head -3 >&2; exit 1; }`,
           // Helper for state-changing PUTs: args $1=path $2=body.
           `ami_put() {`,
           `  local path="$1" body="$2"`,
