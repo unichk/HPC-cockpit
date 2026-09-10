@@ -318,22 +318,76 @@ class StateStore:
         if not isinstance(metrics, list):
             metrics = []
 
-        snapshot = {
-            "node_id": node_id,
-            "timestamp_ms": timestamp_ms,
-            "metrics": metrics,
-            "received_at_ms": now_ms(),
-            "remote_ip": remote_ip,
-        }
+        received_at_ms = now_ms()
+
+        # Workers send one datagram per module, naming it in `module`, so a lost
+        # packet costs one module's freshness instead of the whole snapshot.
+        # Each module therefore replaces only its own slot. A datagram with no
+        # `module` field is a whole-snapshot send from an older worker: group
+        # its metrics by their own module field and replace every slot they
+        # cover, which keeps an un-upgraded worker working against this server.
+        module = parsed.get("module")
+        incoming: dict = {}
+        if isinstance(module, str) and module:
+            incoming[module] = metrics
+        else:
+            for metric in metrics:
+                if not isinstance(metric, dict):
+                    continue
+                name = metric.get("module")
+                if isinstance(name, str) and name:
+                    incoming.setdefault(name, []).append(metric)
 
         with self._lock:
             self._ingest_count += 1
             node_entry = self._nodes.get(node_id)
             if node_entry is None:
-                node_entry = {"latest": snapshot}
+                node_entry = {"modules": {}}
                 self._nodes[node_id] = node_entry
-            else:
-                node_entry["latest"] = snapshot
+            modules = node_entry.setdefault("modules", {})
+            for name, module_metrics in incoming.items():
+                modules[name] = {
+                    "metrics": module_metrics,
+                    "timestamp_ms": timestamp_ms,
+                    "received_at_ms": received_at_ms,
+                }
+            self._rebuild_latest_locked(node_id, node_entry, remote_ip, received_at_ms)
+
+    # Longest a module's last packet may sit before it is treated as gone
+    # rather than merely stale. Well beyond any plausible loss burst, so this
+    # only fires when a collector is actually removed or permanently failing --
+    # otherwise stale metrics for absent hardware would linger forever.
+    MODULE_TTL_MS = 300_000
+
+    def _rebuild_latest_locked(self, node_id: str, node_entry: dict, remote_ip: str,
+                               seen_ms: int) -> None:
+        """Flatten the per-module slots into the single combined snapshot the
+        rest of the server reads. Called with the lock held."""
+        modules = node_entry.get("modules", {})
+        # Fall back to this packet's arrival time so a worker reporting no
+        # metrics at all still counts as alive rather than instantly stale.
+        newest = max((m["received_at_ms"] for m in modules.values()), default=seen_ms)
+
+        for name in [n for n, m in modules.items()
+                     if newest - m["received_at_ms"] > self.MODULE_TTL_MS]:
+            del modules[name]
+
+        metrics: list = []
+        for name in sorted(modules):
+            metrics.extend(modules[name]["metrics"])
+
+        node_entry["latest"] = {
+            "node_id": node_id,
+            # The node is live if *any* module arrived recently -- a single
+            # lossy module must not make the whole node look offline.
+            "timestamp_ms": max((m["timestamp_ms"] for m in modules.values()), default=seen_ms),
+            "received_at_ms": newest,
+            "metrics": metrics,
+            "remote_ip": remote_ip,
+            # Per-module receipt ages, so a consumer can tell which module is
+            # behind rather than seeing one blended freshness number.
+            "module_received_at_ms": {n: m["received_at_ms"] for n, m in modules.items()},
+        }
 
     def health(self) -> dict:
         with self._lock:
@@ -360,6 +414,12 @@ class StateStore:
                         "age_ms": age_ms,
                         "metric_count": len(latest["metrics"]),
                         "metrics": latest["metrics"],
+                        # Age of each module's own last packet. Modules arrive
+                        # in separate datagrams, so one can lag behind the rest.
+                        "module_ages_ms": {
+                            name: max(0, current - seen)
+                            for name, seen in latest.get("module_received_at_ms", {}).items()
+                        },
                     }
                 )
         rows.sort(key=lambda item: item["node_id"])
