@@ -269,7 +269,7 @@ function App() {
     if (offlineCount) issues.push(`${offlineCount} offline`);
     const hotCpu = nodes.filter((n) => n.cpu >= thresholds.cpuHot).length;
     if (hotCpu) issues.push(`${hotCpu} CPU hot`);
-    const hotTemp = nodes.filter((n) => n.temp >= thresholds.tempCrit).length;
+    const hotTemp = nodes.filter((n) => n.temp >= window.nodeTempBands(n, thresholds).crit).length;
     if (hotTemp) issues.push(`${hotTemp} thermal crit`);
     const fanBad = nodes.filter((n) => !n.offline && n.fanTotal > 0 && n.fanOk / n.fanTotal < thresholds.fanOkRatio).length;
     if (fanBad) issues.push(`${fanBad} fan degraded`);

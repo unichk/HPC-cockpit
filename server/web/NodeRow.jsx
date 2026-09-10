@@ -14,12 +14,17 @@ function NodeRow({ node, thresholds, visible, onSelect }) {
   const cpuTone = classForValue(node.cpu, thresholds.cpuWarn, thresholds.cpuHot);
   const memTone = classForValue(node.memPct, 75, 90);
   const swapTone = classForValue(node.swapPct, 20, 50);
-  const tempTone = classForValue(node.temp, thresholds.tempWarn, thresholds.tempCrit);
+  // Hardware limits first, matching the detail page and the alerting.
+  const tempBands = window.nodeTempBands(node, thresholds);
+  const tempTone = classForValue(node.temp, tempBands.warn, tempBands.crit);
   const powerTone = classForValue(node.power, thresholds.nodePowerWarn, thresholds.nodePowerHot);
   const fanRatio = node.fanTotal > 0 ? node.fanOk / node.fanTotal : 1;
   const fanTone = fanRatio < 1 ? (fanRatio < 0.75 ? "crit" : "warn") : "";
   const loadTone = node.load[0] > 20 ? "crit" : node.load[0] > 10 ? "warn" : "";
-  const gpuTempTone = classForValue(node.gpuTempMax || 0, thresholds.tempWarn, thresholds.tempCrit);
+  // GPUs are scored against the BMC's GPU slot limits (92/96 here), not the
+  // CPU's, falling back to the settings bands when the BMC publishes none.
+  const gpuBands = window.nodeTempBands(node, thresholds, "gpu");
+  const gpuTempTone = classForValue(node.gpuTempMax || 0, gpuBands.warn, gpuBands.crit);
 
   const ageTone =
     node.age >= thresholds.ageStale ? "crit" :

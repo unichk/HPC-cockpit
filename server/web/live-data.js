@@ -356,7 +356,19 @@ function mapNode(raw, nowMs) {
   const swapPct = swapTotalG > 0 ? (swapG / swapTotalG) * 100 : 0;
 
   const temp = pickNum(idx, "thermal.cpu_package_max_c", "thermal.cpu_package0_c");
-  const power = pickNum(idx, "power.max_watts", "power.watts");
+  // The BMC's own limits, if it publishes them. 0 when absent. The GPU pair
+  // has no matching thermal reading -- nvidia-smi supplies the temperatures
+  // and publishes no thresholds of its own, so the board vendor's limits are
+  // taken from the BMC's GPU slot sensors instead.
+  const tempWarn = pickNum(idx, "thermal.cpu_warn_c");
+  const tempCrit = pickNum(idx, "thermal.cpu_crit_c");
+  const gpuTempWarn = pickNum(idx, "thermal.gpu_warn_c");
+  const gpuTempCrit = pickNum(idx, "thermal.gpu_crit_c");
+  // Instantaneous reading, not the windowed maximum: "Node Power" is a
+  // now-value, and max_watts comes from the BMC's DCMI statistics registers,
+  // which have been observed returning garbage (19125 W while the
+  // instantaneous reading and the SYS_POWER sensor both said 2325 W).
+  const power = pickNum(idx, "power.watts", "power.max_watts");
   const fanCount = pickNum(idx, "fan.count");
   const fanOk = pickNum(idx, "fan.ok_count");
   const fanRpm = pickNum(idx, "fan.avg_rpm");
@@ -373,6 +385,18 @@ function mapNode(raw, nowMs) {
   let gpuVendor = gpuVendorName(pickNum(idx, "gpu.vendor_code"));
   let gpuPlaceholder = false;
   let gpuTempMax = pickNum(idx, "gpu.temp_max_c");
+  // Per-socket CPU package power, for the power breakdown. Sockets are
+  // discovered from cpu.socket_count so a 1-, 2- or 4-socket box all work.
+  const cpuSocketCount = pickNum(idx, "cpu.socket_count") | 0;
+  const cpuSockets = [];
+  for (let i = 0; i < cpuSocketCount; i++) {
+    cpuSockets.push(pickNum(idx, `cpu.socket${i}_power_w`));
+  }
+  const cpuPowerW = pickNum(idx, "cpu.package_power_w");
+  const dimmPowerW = pickNum(idx, "memory.dimm_power_w");
+  const dimmCount = pickNum(idx, "memory.dimm_count") | 0;
+  const cpuPowerLimitW = pickNum(idx, "cpu.package_power_limit_w");
+
   let gpuPowerSumW = pickNum(idx, "gpu.power_sum_w");
   let gpuUtilAvgPct = pickNum(idx, "gpu.util_avg_percent");
   let gpus = [];
@@ -451,6 +475,15 @@ function mapNode(raw, nowMs) {
     fanRpm,
     fanVendor: fanVendorName(fanVendorCode),
     bmcHost,
+    tempWarn,
+    tempCrit,
+    gpuTempWarn,
+    gpuTempCrit,
+    cpuSockets,
+    cpuPowerW,
+    dimmPowerW,
+    dimmCount,
+    cpuPowerLimitW,
     historyTimes,
     perFan: perFanRpms(raw.metrics),
     gpuCount,
@@ -488,17 +521,32 @@ function initNodes() {
   return [];
 }
 
+// Temperature bands for a node. The hardware's own limits win over the UI
+// settings -- the BMC publishes the board vendor's thresholds (97/100 on this
+// board) while alerts.tempWarn/tempCrit are a generic default someone typed
+// into the settings page. Defined once so the node grid, the detail page and
+// the server-side alerting all decide on the same numbers.
+function nodeTempBands(node, thresholds, kind) {
+  const warn = kind === "gpu" ? node.gpuTempWarn : node.tempWarn;
+  const crit = kind === "gpu" ? node.gpuTempCrit : node.tempCrit;
+  return {
+    warn: warn > 0 ? warn : thresholds.tempWarn,
+    crit: crit > 0 ? crit : thresholds.tempCrit,
+  };
+}
+
 function classifyNode(node, thresholds) {
   if (node.offline || node.age >= thresholds.ageStale) return "crit-offline";
+  const tempBands = nodeTempBands(node, thresholds);
   const critical =
     node.cpu >= thresholds.cpuHot ||
-    node.temp >= thresholds.tempCrit ||
+    node.temp >= tempBands.crit ||
     node.power >= thresholds.nodePowerHot ||
     (node.fanTotal > 0 && node.fanOk / node.fanTotal < thresholds.fanOkRatio) ||
     node.age >= thresholds.ageStale;
   const warn =
     node.cpu >= thresholds.cpuWarn ||
-    node.temp >= thresholds.tempWarn ||
+    node.temp >= tempBands.warn ||
     node.power >= thresholds.nodePowerWarn ||
     node.age >= thresholds.ageWarn ||
     node.memPct >= 85 ||
@@ -608,4 +656,5 @@ Object.assign(window, {
   readCachedSettings,
   resolveNodePower,
   nodeThresholds,
+  nodeTempBands,
 });

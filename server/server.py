@@ -842,6 +842,35 @@ class AlertNotifier:
                 return idx[key]
         return 0.0
 
+    def _power_breakdown(self, idx: dict) -> str:
+        """Component power as one compact line, appended to a power alert so
+        the message says what is actually drawing the watts rather than just
+        that the total crossed a line. Mirrors the detail page's breakdown:
+        the measured parts, then the rest as "Others"."""
+        total = self._pick(idx, "power.watts", "power.max_watts")
+        if total <= 0:
+            return ""
+        parts = []
+        for index in range(int(self._pick(idx, "cpu.socket_count"))):
+            watts = self._pick(idx, f"cpu.socket{index}_power_w")
+            if watts > 0:
+                parts.append((f"CPU {index}", watts))
+        gpu_count = int(self._pick(idx, "gpu.count"))
+        gpu_watts = self._pick(idx, "gpu.power_sum_w")
+        if gpu_count > 0 and gpu_watts > 0:
+            parts.append((f"GPUs ({gpu_count})", gpu_watts))
+        dimm_watts = self._pick(idx, "memory.dimm_power_w")
+        if dimm_watts > 0:
+            parts.append((f"DIMMs ({int(self._pick(idx, 'memory.dimm_count'))})", dimm_watts))
+        if not parts:
+            return ""
+        others = total - sum(watts for _, watts in parts)
+        if others > 0:
+            parts.append(("Others", others))
+        return "breakdown: " + " · ".join(
+            f"{name} {watts:.0f}W ({watts / total * 100:.0f}%)" for name, watts in parts
+        )
+
     def _evaluate(self, row: dict, settings: dict) -> tuple:
         idx = self._index(row)
         alerts = settings.get("alerts", {})
@@ -853,15 +882,29 @@ class AlertNotifier:
         age_s = max(0.0, row.get("age_ms", 0) / 1000.0)
         age_warn, age_stale = band("ageWarn", 15), band("ageStale", 60)
         cpu_warn, cpu_hot = band("cpuWarn", 80), band("cpuHot", 95)
-        temp_warn, temp_crit = band("tempWarn", 80), band("tempCrit", 90)
+        # Hardware limits win over the settings, matching nodeTempBands() in
+        # web/live-data.js: the BMC publishes the board vendor's own CPU
+        # thresholds, and alerting on a generic default instead would disagree
+        # with what the dashboard and detail page show.
+        temp_warn = self._pick(idx, "thermal.cpu_warn_c") or band("tempWarn", 80)
+        temp_crit = self._pick(idx, "thermal.cpu_crit_c") or band("tempCrit", 90)
         fan_ratio_min = band("fanOkRatio", 1.0)
         power_warn, power_hot = self._power_bands(row["node_id"], settings)
         power_warn = float(power_warn) if isinstance(power_warn, (int, float)) else 1700.0
         power_hot = float(power_hot) if isinstance(power_hot, (int, float)) else 1900.0
 
+        # GPUs are scored against the BMC's GPU slot limits rather than the
+        # CPU's, mirroring nodeTempBands(node, thresholds, "gpu") in the UI.
+        gpu_temp = self._pick(idx, "gpu.temp_max_c")
+        gpu_count = self._pick(idx, "gpu.count")
+        gpu_warn = self._pick(idx, "thermal.gpu_warn_c") or band("tempWarn", 80)
+        gpu_crit = self._pick(idx, "thermal.gpu_crit_c") or band("tempCrit", 90)
+
         cpu = self._pick(idx, "cpu.usage")
         temp = self._pick(idx, "thermal.cpu_package_max_c", "thermal.cpu_package0_c")
-        power = self._pick(idx, "power.max_watts", "power.watts")
+        # Instantaneous, matching live-data.js: alerting on the BMC's windowed
+        # maximum would page on a single glitched statistics register.
+        power = self._pick(idx, "power.watts", "power.max_watts")
         fan_total = self._pick(idx, "fan.count")
         fan_ok = self._pick(idx, "fan.ok_count")
         mem_total = self._pick(idx, "memory.total")
@@ -881,6 +924,8 @@ class AlertNotifier:
             crit.append(f"power {power:.0f}W (crit {power_hot:.0f}W)")
         if fan_total > 0 and fan_ratio < fan_ratio_min:
             crit.append(f"fans {fan_ok:.0f}/{fan_total:.0f} ok")
+        if gpu_count > 0 and gpu_temp >= gpu_crit:
+            crit.append(f"GPU temp {gpu_temp:.0f}C (crit {gpu_crit:.0f}C)")
 
         if age_s >= age_warn:
             warn.append(f"no data for {age_s:.0f}s (warn {age_warn:.0f}s)")
@@ -894,11 +939,20 @@ class AlertNotifier:
             warn.append(f"memory {mem_pct:.0f}%")
         if swap_pct >= 25:
             warn.append(f"swap {swap_pct:.0f}%")
+        if gpu_count > 0 and gpu_temp >= gpu_warn:
+            warn.append(f"GPU temp {gpu_temp:.0f}C (warn {gpu_warn:.0f}C)")
+
+        # A power crossing says the total moved; the breakdown says why.
+        def with_breakdown(reasons: list) -> list:
+            if not any(r.startswith("power ") for r in reasons):
+                return reasons
+            line = self._power_breakdown(idx)
+            return reasons + [line] if line else reasons
 
         if crit:
-            return "crit", crit
+            return "crit", with_breakdown(crit)
         if warn:
-            return "warn", warn
+            return "warn", with_breakdown(warn)
         return "ok", []
 
     def _post(self, events: list) -> None:

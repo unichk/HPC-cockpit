@@ -76,6 +76,24 @@
       .nd-chart-tip-time { font-size: 8.5px; font-weight: 600; opacity: 0.75; font-variant-numeric: tabular-nums; }
 
       .nd-fan-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px; }
+      /* Power Draw: reading and trace in the left half, right half reserved. */
+      .nd-power-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; align-items: stretch; }
+      /* Power Draw shares its grid row with Resource Usage and stretches to
+         match it. Rather than leave the slack blank, hand it to the chart:
+         card -> grid -> left column -> .nd-chart all pass the height down, so
+         the trace grows to whatever the row ends up being. */
+      .nd-card-fill { display: flex; flex-direction: column; }
+      .nd-card-fill .nd-power-grid { flex: 1 1 auto; }
+      .nd-power-left { display: flex; flex-direction: column; }
+      .nd-power-left .nd-chart { flex: 1 1 auto; min-height: 80px; }
+      .nd-power-left .nd-chart svg { height: 100%; }
+      .nd-pb-title { font-size: 8.5px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; color: var(--muted); margin-bottom: 7px; }
+      .nd-pb-row { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 6px; margin-bottom: 5px; }
+      .nd-pb-name { font-size: 10px; font-weight: 600; color: var(--ink); }
+      .nd-pb-val { font-size: 10.5px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--ink); }
+      .nd-pb-pct { font-size: 8.5px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+      .nd-pb-sep { border-top: 1px solid var(--line); margin: 7px 0 6px; }
+      .nd-pb-gap { font-size: 9px; color: var(--muted); line-height: 1.4; margin-top: 5px; }
       /* Thermal domains: one sub-panel per domain, 2 columns x 4 rows. */
       /* grid-auto-rows:1fr makes every row the height of the tallest one, so
          all 8 panels end up identical rather than each row sizing to its own
@@ -174,6 +192,7 @@
         .nd-body { grid-template-columns: 1fr; }
         .nd-fan-grid { grid-template-columns: repeat(4, 1fr); }
         .nd-therm-grid { grid-template-columns: 1fr; }
+        .nd-power-grid { grid-template-columns: 1fr; }
       }
 
       .nd-modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.5); backdrop-filter: blur(3px); z-index: 500; display: flex; align-items: center; justify-content: center; }
@@ -232,8 +251,12 @@
       // data, which makes idle noise look like huge swings and means the shape
       // changes meaning between refreshes. With them the height is comparable
       // over time and against the thresholds.
+      // `fill` makes the chart take its height from the layout instead of the
+      // `height` prop. preserveAspectRatio="none" already stretches the viewBox
+      // to whatever box the SVG gets, so `height` stays the nominal aspect and
+      // only the CSS height changes.
       function MiniChart({ values, color = "var(--accent)", height = 56, yMin, yMax,
-                           times, unit = "", digits = 0 }) {
+                           times, unit = "", digits = 0, fill = false }) {
         // hover = { i, w }: the sample index plus the container width at the
         // time of the move, so the readout can be clamped in real units.
         const [hover, setHover] = useState(null);
@@ -274,7 +297,8 @@
               setHover({ i: Math.round(frac * (values.length - 1)), w: r.width });
             }}
             onMouseLeave={() => setHover(null)}>
-            <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ height }}>
+            <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
+              style={{ height: fill ? "100%" : height }}>
               <defs>
                 <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor={color} stopOpacity="0.25" />
@@ -1798,9 +1822,23 @@
         const powTone  = tone(node.power, thr.nodePowerWarn, thr.nodePowerHot);
         const fanRatio = node.fanTotal > 0 ? node.fanOk / node.fanTotal : 1;
         const fanTone  = fanRatio < 0.75 ? "crit" : fanRatio < 1 ? "warn" : "";
-        const gpuTempTone = tone(node.gpuTempMax || 0, thr.tempWarn, thr.tempCrit);
+        // GPUs against the BMC's GPU slot limits, not the CPU's.
+        const gpuWarn = thermByName.gpu_warn_c ?? thr.tempWarn;
+        const gpuCrit = thermByName.gpu_crit_c ?? thr.tempCrit;
+        const gpuTempTone = tone(node.gpuTempMax || 0, gpuWarn, gpuCrit);
         const isOffline = node.age >= thr.ageStale;
         const colorFor = t => t === "crit" ? "var(--crit)" : t === "warn" ? "var(--warn)" : "var(--ok)";
+        // Temperature bars span <idle> .. crit + 10. Previously they used the
+        // reading as a percentage, so 55 C filled 55% of a track that meant
+        // nothing: the bottom covered temperatures that never occur and the top
+        // was unreachable. The floor is each domain's realistic idle -- CPU 45,
+        // GPU 30 -- so the bar starts near empty on a quiet node and full means
+        // "at the hardware limit", comparable across tiles whose limits differ
+        // (CPU 100, GPU 96). Matches the 45 C floor on the temperature chart.
+        const tempBarPct = (value, crit, idle) => {
+          const hi = (crit || 100) + 10;
+          return Math.max(0, Math.min(100, ((value - idle) / (hi - idle)) * 100));
+        };
 
         const rawRows = node.rawMetrics.map(r => ({
           module: r.module || "",
@@ -1895,7 +1933,7 @@
               <div className={`nd-kpi ${tempTone}`}>
                 <div className="nd-kpi-label">CPU Temp</div>
                 <div className="nd-kpi-val">{Math.round(node.temp)}<span className="u">°C</span></div>
-                <div className="nd-kpi-bar"><div className="nd-kpi-bar-fill" style={{ width: `${Math.min(100, node.temp)}%`, background: colorFor(tempTone) }} /></div>
+                <div className="nd-kpi-bar"><div className="nd-kpi-bar-fill" style={{ width: `${tempBarPct(node.temp, tempCrit, 45)}%`, background: colorFor(tempTone) }} /></div>
                 <div className="nd-kpi-sub">Warn {tempWarn}° · Crit {tempCrit}°</div>
               </div>
               <div className={`nd-kpi ${fanTone}`}>
@@ -1920,7 +1958,7 @@
                   ) : (
                     <>
                       <div className="nd-kpi-val">{Math.round(node.gpuTempMax)}<span className="u">°C</span></div>
-                      <div className="nd-kpi-bar"><div className="nd-kpi-bar-fill" style={{ width: `${Math.min(100, node.gpuTempMax)}%`, background: colorFor(gpuTempTone) }} /></div>
+                      <div className="nd-kpi-bar"><div className="nd-kpi-bar-fill" style={{ width: `${tempBarPct(node.gpuTempMax, gpuCrit, 30)}%`, background: colorFor(gpuTempTone) }} /></div>
                       <div className="nd-kpi-sub">
                         {node.gpuCount}× {node.gpuVendor} · {Math.round(node.gpuPowerSumW)}W · {Math.round(node.gpuUtilAvgPct)}%
                       </div>
@@ -1973,31 +2011,75 @@
                 </div>
               </div>
 
-              <div className="nd-card">
+              <div className="nd-card nd-card-fill">
                 <h3>Power Draw</h3>
-                <div style={{ marginBottom: 10 }}>
-                  <div className="nd-bar-header">
-                    <span className="nd-bar-label">Node Power</span>
-                    <span className={`nd-bar-value ${powTone}`} style={{ fontSize: 22 }}>{Math.round(node.power)}<span className="u">W</span></span>
-                  </div>
-                  <div className="nd-bar-track" style={{ height: 7, marginTop: 6 }}>
-                    <div className="nd-bar-fill" style={{ width:`${Math.min(100,(node.power/thr.nodePowerHot)*100)}%`, background: colorFor(powTone) }} />
-                  </div>
-                </div>
-                {/* Fixed 0..crit+100 W scale: the trace height is then directly
-                    comparable over time and reads against the threshold tiles
-                    below, rather than auto-fitting to whatever the last 60
-                    samples happened to span. */}
-                <MiniChart values={node.powerHistory.map(v => v * 10)} color={colorFor(powTone)}
-                  height={80} yMin={0} yMax={thr.nodePowerHot + 100}
-                  times={node.historyTimes} unit="W" />
-                <div style={{ marginTop: 12, display: "flex", gap: 12 }}>
-                  {[["Warn threshold", `${thr.nodePowerWarn}W`], ["Crit threshold", `${thr.nodePowerHot}W`]].map(([k,v]) => (
-                    <div key={k} style={{ flex: 1, padding: "6px 10px", borderRadius: 8, background: "var(--surface-2)", border: "1px solid var(--line)" }}>
-                      <div style={{ fontSize: 9, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>{k}</div>
-                      <div style={{ fontSize: 16, fontWeight: 800, color: "var(--ink)", fontVariantNumeric: "tabular-nums" }}>{v}</div>
+                <div className="nd-power-grid">
+                  <div className="nd-power-left">
+                    <div style={{ marginBottom: 10 }}>
+                      <div className="nd-bar-header">
+                        <span className="nd-bar-label">Node Power</span>
+                        <span className={`nd-bar-value ${powTone}`} style={{ fontSize: 22 }}>{Math.round(node.power)}<span className="u">W</span></span>
+                      </div>
+                      <div className="nd-bar-track" style={{ height: 7, marginTop: 6 }}>
+                        <div className="nd-bar-fill" style={{ width:`${Math.min(100,(node.power/thr.nodePowerHot)*100)}%`, background: colorFor(powTone) }} />
+                      </div>
                     </div>
-                  ))}
+                    {/* Fixed 0..crit+100 W scale, so the trace height is
+                        comparable over time and between nodes rather than
+                        auto-fitting to whatever the last 60 samples spanned.
+                        The axis top value is therefore the crit level + 100. */}
+                    <MiniChart values={node.powerHistory.map(v => v * 10)} color={colorFor(powTone)}
+                      height={80} fill yMin={0} yMax={thr.nodePowerHot + 100}
+                      times={node.historyTimes} unit="W" />
+                  </div>
+                  {/* Power breakdown: everything we can actually measure,
+                      plus the shortfall against the node total. The gap is
+                      real and large -- fans, DIMMs, drives and PSU conversion
+                      loss are not individually instrumented on this chassis --
+                      so it is shown explicitly rather than hidden by
+                      normalising the parts to 100%. */}
+                  <div>
+                    <div className="nd-pb-title">Breakdown</div>
+                    {(() => {
+                      const total = node.power || 0;
+                      const parts = [];
+                      (node.cpuSockets || []).forEach((w, i) => {
+                        if (w > 0) parts.push({ name: `CPU ${i}`, w });
+                      });
+                      if (node.gpuCount > 0 && node.gpuPowerSumW > 0) {
+                        parts.push({ name: `GPUs (${node.gpuCount})`, w: node.gpuPowerSumW });
+                      }
+                      if (node.dimmPowerW > 0) {
+                        parts.push({ name: `DIMMs (${node.dimmCount})`, w: node.dimmPowerW });
+                      }
+                      const measured = parts.reduce((a, p) => a + p.w, 0);
+                      const gap = total - measured;
+                      if (parts.length === 0) {
+                        return <div className="nd-pb-gap">No component power reported.</div>;
+                      }
+                      const pct = w => (total > 0 ? (w / total) * 100 : 0);
+                      const row = (name, w, muted) => (
+                        <div className="nd-pb-row" key={name}>
+                          <span className="nd-pb-name" style={muted ? { color: "var(--muted)" } : undefined}>{name}</span>
+                          <span>
+                            <span className="nd-pb-val" style={muted ? { color: "var(--muted)" } : undefined}>{Math.round(w)}<span className="nd-pb-pct">W</span></span>
+                            <span className="nd-pb-pct"> · {pct(w).toFixed(0)}%</span>
+                          </span>
+                        </div>
+                      );
+                      return (
+                        <>
+                          {parts.map(p => row(p.name, p.w, false))}
+                          {row("Others", Math.max(0, gap), true)}
+                          <div className="nd-pb-sep" />
+                          <div className="nd-pb-row">
+                            <span className="nd-pb-name">Node total</span>
+                            <span><span className="nd-pb-val">{Math.round(total)}<span className="nd-pb-pct">W</span></span></span>
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
                 </div>
               </div>
 
