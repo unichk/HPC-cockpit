@@ -138,6 +138,26 @@ class PowerCollector : public Collector {
       return false;
     }
 
+    // The instantaneous register can glitch too, not just the min/max/avg
+    // window below. A reading that jumps several-fold in one interval is
+    // almost certainly bad -- a chassis already drawing hundreds of watts
+    // cannot multiply its draw between two ticks -- so cross-check it against
+    // the SYS_POWER analogue sensor, which is measured independently of DCMI.
+    // The extra IPMI call only happens on suspicion, so it costs nothing in
+    // the normal case.
+    if (last_watts_ > 100.0 && watts > last_watts_ * 4.0 && watts - last_watts_ > 1500.0) {
+      double sensor_watts = 0.0;
+      if (ReadSysPowerSensor(sensor_watts) && sensor_watts > 0.0) {
+        const double diff = watts > sensor_watts ? watts - sensor_watts : sensor_watts - watts;
+        if (diff > sensor_watts * 0.25) {
+          // The two disagree by more than a quarter: trust the sensor.
+          out.push_back(Metric{"power", "reading_rejected", 1.0, "bool"});
+          watts = sensor_watts;
+        }
+      }
+    }
+    last_watts_ = watts;
+
     double min_watts = watts;
     double max_watts = watts;
     double avg_watts = watts;
@@ -180,6 +200,34 @@ class PowerCollector : public Collector {
       out.push_back(Metric{"power", "sample_period_s", period_s, "second"});
     }
     return true;
+  }
+
+  // Read the whole-system wattage from the analogue sensor rows. Used only to
+  // arbitrate a suspicious DCMI reading; it is a different measurement path
+  // inside the BMC, so the two agreeing is meaningful.
+  static bool ReadSysPowerSensor(double& watts) {
+    std::string payload;
+    if (!RunCommand("timeout 5s ipmitool sdr type Current 2>/dev/null", payload)) {
+      return false;
+    }
+    std::istringstream stream(payload);
+    std::string line;
+    while (std::getline(stream, line)) {
+      const auto fields = SplitPipe(line);
+      if (fields.size() < 5) {
+        continue;
+      }
+      if (ToUpper(fields[4]).find("WATT") == std::string::npos) {
+        continue;
+      }
+      try {
+        watts = std::stod(fields[4]);
+      } catch (...) {
+        continue;
+      }
+      return true;
+    }
+    return false;
   }
 
   // Fallback for BMCs without DCMI. Scan the analogue sensor rows for a
@@ -294,6 +342,8 @@ class PowerCollector : public Collector {
   }
 
   bool last_available_ = true;
+  // Last accepted instantaneous reading, for the jump check above.
+  double last_watts_ = 0.0;
 };
 
 }  // namespace
