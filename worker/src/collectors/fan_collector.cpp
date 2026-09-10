@@ -75,18 +75,6 @@ std::vector<std::string> SplitPipe(const std::string& value) {
   return parts;
 }
 
-bool IsAllDigits(const std::string& value) {
-  if (value.empty()) {
-    return false;
-  }
-  for (const char ch : value) {
-    if (!std::isdigit(static_cast<unsigned char>(ch))) {
-      return false;
-    }
-  }
-  return true;
-}
-
 bool ParseLeadingDouble(const std::string& value, double& out_value) {
   std::stringstream stream(value);
   stream >> out_value;
@@ -199,10 +187,12 @@ class FanCollector : public Collector {
     }
 
     std::string payload;
-    if (!RunCommand("ipmi-sensors --sensor-type=Fan 2>&1", payload)) {
+    if (!RunCommand("timeout 5s ipmitool sdr type Fan 2>/dev/null", payload)) {
       out.push_back(Metric{"fan", "available", 0.0, "bool"});
       if (last_available_) {
-        error = "ipmi-sensors fan query failed (missing tool/permission). cmd='ipmi-sensors --sensor-type=Fan'";
+        error =
+            "ipmitool fan query failed (missing tool/permission). "
+            "cmd='ipmitool sdr type Fan'";
         last_available_ = false;
         return false;
       }
@@ -215,47 +205,58 @@ class FanCollector : public Collector {
     int ok_count = 0;
     const std::regex rpm_regex(R"(([0-9]+(?:\.[0-9]+)?)\s*RPM)");
     int fallback_index = 0;
+    int unpopulated = 0;
 
     while (std::getline(stream, line)) {
-      std::string sensor_raw_name;
+      // ipmitool layout: "SYS_FAN1 | A1h | ok | 29.3 | 13350 RPM".
+      // Headers with no fan installed read "CPU_FAN_0 | 9Ch | ns | 29.1 |
+      // No Reading" — those are empty headers, not failed fans, so they are
+      // excluded from both count and ok_count rather than scored as 0 RPM.
       const auto fields = SplitPipe(line);
-      double rpm = 0.0;
+      if (fields.size() < 5) {
+        continue;
+      }
+      const std::string& state = fields[2];
+      const std::string& reading = fields[4];
+      if (reading.find("RPM") == std::string::npos) {
+        if (state == "ns" || reading.find("No Reading") != std::string::npos ||
+            reading.find("Disabled") != std::string::npos) {
+          ++unpopulated;
+        }
+        continue;
+      }
 
-      if (fields.size() >= 5) {
-        if (!(IsAllDigits(fields[0]) && fields[4] == "RPM" && ParseLeadingDouble(fields[3], rpm))) {
-          continue;
-        }
-        sensor_raw_name = fields[1];
-      } else {
-        if (line.find("RPM") == std::string::npos) {
-          continue;
-        }
+      double rpm = 0.0;
+      if (!ParseLeadingDouble(reading, rpm)) {
         std::smatch match;
         if (!std::regex_search(line, match, rpm_regex)) {
           continue;
         }
         rpm = std::stod(match[1].str());
-        if (!fields.empty()) {
-          sensor_raw_name = fields[0];
-        } else {
-          sensor_raw_name = "fan_" + std::to_string(++fallback_index);
-        }
       }
 
+      std::string sensor_raw_name = fields[0];
+      if (sensor_raw_name.empty()) {
+        sensor_raw_name = "fan_" + std::to_string(++fallback_index);
+      }
       const std::string sensor_name = SanitizeName(sensor_raw_name);
       out.push_back(Metric{"fan", sensor_name + "_rpm", rpm, "rpm"});
       rpms.push_back(rpm);
-      if (line.find("Nominal") != std::string::npos || line.find("Normal") != std::string::npos ||
-          line.find("Good") != std::string::npos || line.find("OK") != std::string::npos ||
-          line.find("| ok |") != std::string::npos) {
+      // "ok" is ipmitool's own threshold verdict for the row; anything else
+      // ("nc" non-critical, "cr" critical, "nr" non-recoverable) is a fault.
+      if (state == "ok") {
         ++ok_count;
       }
+    }
+
+    if (unpopulated > 0) {
+      out.push_back(Metric{"fan", "unpopulated_count", static_cast<double>(unpopulated), "count"});
     }
 
     if (rpms.empty()) {
       out.push_back(Metric{"fan", "available", 0.0, "bool"});
       if (last_available_) {
-        error = "ipmi-sensors returned no RPM fan sensors";
+        error = "ipmitool returned no RPM fan sensors";
         last_available_ = false;
         return false;
       }
