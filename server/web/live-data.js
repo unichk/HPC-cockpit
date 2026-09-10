@@ -38,7 +38,7 @@ function gpuVendorName(code) {
 //   - URL query param:   ?fakegpu=0   disables for one page load
 //   - URL query param:   ?fakegpu=4   forces 4 fake GPUs
 //   - sessionStorage:    cockpit_fake_gpu = "0" / "2" / "4" etc.
-const FAKE_GPU_DEFAULT_COUNT = 2;
+const FAKE_GPU_DEFAULT_COUNT = 0;
 const FAKE_GPU_VENDOR = "amd";  // "amd" | "nvidia"
 
 function fakeGpuCount() {

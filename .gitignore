@@ -3,3 +3,4 @@ worker/build
 */__pycache__
 
 server/schedule.json
+server/settings.json
