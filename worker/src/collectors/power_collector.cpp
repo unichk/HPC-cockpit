@@ -145,6 +145,29 @@ class PowerCollector : public Collector {
     ValueAfterKey(payload, "Maximum during sampling period", max_watts);
     ValueAfterKey(payload, "Average power reading over sample period", avg_watts);
 
+    // The BMC's rolling statistics registers are not always trustworthy. On a
+    // Giga Computing G494-ZB4 they were seen reporting max = avg = 19125 W
+    // while the instantaneous reading and the SYS_POWER sensor both said
+    // 2325 W -- 8x the real draw, and more than the chassis could physically
+    // pull. `avg` exactly equalling `max` while `min` exactly equalled the
+    // instantaneous reading is the signature of registers that never updated,
+    // so the values are self-consistent and an ordering check alone will not
+    // catch it.
+    //
+    // Reject the window instead when it is implausible against the
+    // instantaneous reading. Over a 5-second window a server already drawing
+    // hundreds of watts cannot swing by 4x, and requiring an absolute gap too
+    // avoids over-rejecting a genuine burst on a near-idle node.
+    const double reference = watts > 100.0 ? watts : 100.0;
+    const bool ordered = min_watts <= avg_watts && avg_watts <= max_watts;
+    const bool plausible = max_watts <= reference * 4.0 || max_watts - watts <= 1500.0;
+    if (!ordered || !plausible) {
+      min_watts = watts;
+      avg_watts = watts;
+      max_watts = watts;
+      out.push_back(Metric{"power", "window_rejected", 1.0, "bool"});
+    }
+
     out.push_back(Metric{"power", "available", 1.0, "bool"});
     out.push_back(Metric{"power", "source_code", kSourceDcmi, "enum"});
     out.push_back(Metric{"power", "watts", watts, "watt"});
