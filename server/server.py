@@ -10,6 +10,8 @@ import time
 import zlib
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import urllib.error
+import urllib.request
 from urllib.parse import unquote
 
 
@@ -722,6 +724,243 @@ class StateStore:
         return {"warning_case": case, "target_node": target_id}
 
 
+# Discord webhook that warn/crit escalations are posted to. Anyone holding this
+# URL can post to that channel, so it is deliberately NOT exposed through
+# /api/settings (which is served without authentication) and is never logged.
+# --discord-webhook / HPC_COCKPIT_DISCORD_WEBHOOK override it; "" disables.
+DISCORD_WEBHOOK_URL = (
+    "https://discord.com/api/webhooks/1547626216046071899/"
+    "zSX2myyqelAFgm9eZNhBln-_ZvAC5algUm_xaLa4fDnVwZVVXp1K82SD-nRJSHcEvF-x"
+)
+
+STATUS_RANK = {"ok": 0, "warn": 1, "crit": 2}
+STATUS_COLOR = {"ok": 0x3BA55D, "warn": 0xE8A33D, "crit": 0xE0524A}
+
+
+class AlertNotifier:
+    """Watches StateStore and posts node warn/crit escalations to Discord.
+
+    The dashboard already colours and sounds alarms, but only while a browser
+    has it open. This runs in the server so alerts fire unattended.
+
+    Classification mirrors classifyNode() in web/live-data.js so the message
+    always agrees with what the UI shows; if you change the rules there, change
+    them here too.
+    """
+
+    INTERVAL_S = 10
+    # Per node+level, the minimum gap between messages. Escalation-only already
+    # suppresses repeats, but a node flapping ok->warn->ok would otherwise send
+    # on every bounce.
+    COOLDOWN_S = 300
+
+    def __init__(self, webhook_url: str, state: "StateStore", settings: "SettingsStore") -> None:
+        self._url = webhook_url
+        self._state = state
+        self._settings = settings
+        self._prev: dict = {}
+        self._last_sent: dict = {}
+        self._primed = False
+        self._stop = threading.Event()
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.INTERVAL_S):
+            try:
+                self._tick()
+            except Exception as exc:
+                # A notifier fault must never take the server down.
+                print(f"alert_notifier_error msg={exc}")
+
+    def _tick(self) -> None:
+        settings = self._settings.get()
+        rows = self._state.node_summaries()
+        events = []
+        seen = set()
+        now = time.time()
+
+        for row in rows:
+            node_id = row["node_id"]
+            seen.add(node_id)
+            status, reasons = self._evaluate(row, settings)
+            prev = self._prev.get(node_id)
+            self._prev[node_id] = status
+            if not self._primed or prev is None:
+                continue
+            escalated = STATUS_RANK.get(status, 0) > STATUS_RANK.get(prev, 0)
+            recovered = status == "ok" and prev != "ok"
+            if not (escalated or recovered):
+                continue
+            key = (node_id, status)
+            if now - self._last_sent.get(key, 0) < self.COOLDOWN_S:
+                continue
+            self._last_sent[key] = now
+            events.append((node_id, prev, status, reasons))
+
+        for node_id in [n for n in self._prev if n not in seen]:
+            del self._prev[node_id]
+
+        # First pass only records the baseline, so a restart does not fire an
+        # alert for every node that is already warm.
+        if not self._primed:
+            self._primed = True
+            return
+        if events:
+            self._post(events)
+
+    def _power_bands(self, node_id: str, settings: dict) -> tuple:
+        alerts = settings.get("alerts", {})
+        warn = alerts.get("nodePowerWarn")
+        hot = alerts.get("nodePowerHot")
+        group = (settings.get("nodeGroups") or {}).get(node_id)
+        if group:
+            band = (settings.get("groupAlerts") or {}).get(group) or {}
+            warn = band.get("nodePowerWarn", warn)
+            hot = band.get("nodePowerHot", hot)
+        return warn, hot
+
+    @staticmethod
+    def _index(row: dict) -> dict:
+        out = {}
+        for metric in row.get("metrics", []):
+            if not isinstance(metric, dict):
+                continue
+            module, name, value = metric.get("module"), metric.get("name"), metric.get("value")
+            if isinstance(module, str) and isinstance(name, str) and isinstance(value, (int, float)):
+                out[f"{module}.{name}"] = float(value)
+        return out
+
+    @staticmethod
+    def _pick(idx: dict, *keys: str) -> float:
+        for key in keys:
+            if key in idx:
+                return idx[key]
+        return 0.0
+
+    def _evaluate(self, row: dict, settings: dict) -> tuple:
+        idx = self._index(row)
+        alerts = settings.get("alerts", {})
+
+        def band(key: str, default: float) -> float:
+            value = alerts.get(key)
+            return float(value) if isinstance(value, (int, float)) else default
+
+        age_s = max(0.0, row.get("age_ms", 0) / 1000.0)
+        age_warn, age_stale = band("ageWarn", 15), band("ageStale", 60)
+        cpu_warn, cpu_hot = band("cpuWarn", 80), band("cpuHot", 95)
+        temp_warn, temp_crit = band("tempWarn", 80), band("tempCrit", 90)
+        fan_ratio_min = band("fanOkRatio", 1.0)
+        power_warn, power_hot = self._power_bands(row["node_id"], settings)
+        power_warn = float(power_warn) if isinstance(power_warn, (int, float)) else 1700.0
+        power_hot = float(power_hot) if isinstance(power_hot, (int, float)) else 1900.0
+
+        cpu = self._pick(idx, "cpu.usage")
+        temp = self._pick(idx, "thermal.cpu_package_max_c", "thermal.cpu_package0_c")
+        power = self._pick(idx, "power.max_watts", "power.watts")
+        fan_total = self._pick(idx, "fan.count")
+        fan_ok = self._pick(idx, "fan.ok_count")
+        mem_total = self._pick(idx, "memory.total")
+        mem_pct = (self._pick(idx, "memory.used") / mem_total * 100.0) if mem_total > 0 else 0.0
+        swap_total = self._pick(idx, "memory.swap_total")
+        swap_pct = (self._pick(idx, "memory.swap_used") / swap_total * 100.0) if swap_total > 0 else 0.0
+        fan_ratio = (fan_ok / fan_total) if fan_total > 0 else 1.0
+
+        crit, warn = [], []
+        if age_s >= age_stale:
+            crit.append(f"no data for {age_s:.0f}s (stale at {age_stale:.0f}s)")
+        if cpu >= cpu_hot:
+            crit.append(f"CPU {cpu:.0f}% (crit {cpu_hot:.0f}%)")
+        if temp >= temp_crit:
+            crit.append(f"CPU temp {temp:.0f}C (crit {temp_crit:.0f}C)")
+        if power >= power_hot:
+            crit.append(f"power {power:.0f}W (crit {power_hot:.0f}W)")
+        if fan_total > 0 and fan_ratio < fan_ratio_min:
+            crit.append(f"fans {fan_ok:.0f}/{fan_total:.0f} ok")
+
+        if age_s >= age_warn:
+            warn.append(f"no data for {age_s:.0f}s (warn {age_warn:.0f}s)")
+        if cpu >= cpu_warn:
+            warn.append(f"CPU {cpu:.0f}% (warn {cpu_warn:.0f}%)")
+        if temp >= temp_warn:
+            warn.append(f"CPU temp {temp:.0f}C (warn {temp_warn:.0f}C)")
+        if power >= power_warn:
+            warn.append(f"power {power:.0f}W (warn {power_warn:.0f}W)")
+        if mem_pct >= 85:
+            warn.append(f"memory {mem_pct:.0f}%")
+        if swap_pct >= 25:
+            warn.append(f"swap {swap_pct:.0f}%")
+
+        if crit:
+            return "crit", crit
+        if warn:
+            return "warn", warn
+        return "ok", []
+
+    def _post(self, events: list) -> None:
+        worst = "ok"
+        for _, _, status, _ in events:
+            if STATUS_RANK.get(status, 0) > STATUS_RANK.get(worst, 0):
+                worst = status
+
+        fields = []
+        # Discord caps an embed at 25 fields.
+        for node_id, prev, status, reasons in events[:25]:
+            arrow = "recovered" if status == "ok" else f"{prev} -> {status}"
+            detail = "\n".join(f"- {r}" for r in reasons) if reasons else "all metrics back within limits"
+            fields.append({
+                "name": f"{node_id} ({arrow})",
+                "value": detail[:1024],
+                "inline": False,
+            })
+        if len(events) > 25:
+            fields.append({"name": "...", "value": f"and {len(events) - 25} more", "inline": False})
+
+        crit_n = sum(1 for e in events if e[2] == "crit")
+        warn_n = sum(1 for e in events if e[2] == "warn")
+        ok_n = sum(1 for e in events if e[2] == "ok")
+        parts = []
+        if crit_n:
+            parts.append(f"{crit_n} critical")
+        if warn_n:
+            parts.append(f"{warn_n} warning")
+        if ok_n:
+            parts.append(f"{ok_n} recovered")
+
+        payload = {
+            "username": "HPC Cockpit",
+            "embeds": [{
+                "title": ", ".join(parts) or "node status change",
+                "color": STATUS_COLOR.get(worst, STATUS_COLOR["warn"]),
+                "fields": fields,
+                "footer": {"text": "hpc-cockpit"},
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
+            }],
+        }
+
+        request = urllib.request.Request(
+            self._url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "User-Agent": "hpc-cockpit/1.0"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                code = response.status
+        except urllib.error.HTTPError as exc:
+            # 429 is Discord rate limiting; the next tick will try again.
+            print(f"discord_post_failed status={exc.code} events={len(events)}")
+            return
+        except Exception as exc:
+            print(f"discord_post_failed msg={type(exc).__name__} events={len(events)}")
+            return
+        print(f"discord_post ok status={code} events={len(events)} worst={worst}")
+
+
 class UdpHandler(socketserver.BaseRequestHandler):
     state: StateStore = None
 
@@ -1102,6 +1341,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to settings JSON file (default: <server_dir>/settings.json)",
     )
     parser.add_argument(
+        "--discord-webhook",
+        default=None,
+        help="Discord webhook for warn/crit alerts (default: built-in; "
+             "empty string disables; env HPC_COCKPIT_DISCORD_WEBHOOK also works)",
+    )
+    parser.add_argument(
         "--worker-exec-port",
         type=int,
         default=9100,
@@ -1145,6 +1390,17 @@ def main() -> int:
     udp_thread = threading.Thread(target=udp_server.serve_forever, daemon=True)
     udp_thread.start()
 
+    # Precedence: --discord-webhook, then the env var, then the built-in URL.
+    webhook = args.discord_webhook
+    if webhook is None:
+        webhook = os.environ.get("HPC_COCKPIT_DISCORD_WEBHOOK", DISCORD_WEBHOOK_URL)
+    notifier = None
+    if webhook.strip():
+        notifier = AlertNotifier(webhook.strip(), state, settings)
+        notifier.start()
+    # Never print the URL itself.
+    print(f"discord_alerts={'on' if notifier else 'off'}")
+
     print(
         f"udp_listen={args.udp_host}:{args.udp_port} "
         f"http_listen={args.http_host}:{args.http_port} "
@@ -1156,6 +1412,8 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if notifier is not None:
+            notifier.stop()
         udp_server.shutdown()
         http_server.shutdown()
         udp_server.server_close()
