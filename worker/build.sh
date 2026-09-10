@@ -53,10 +53,12 @@ g++ -std=c++17 -Wall -Wextra -Wpedantic \
   "${ROOT_DIR}/src/collectors/thermal_collector.cpp" \
   "${ROOT_DIR}/src/collectors/power_collector.cpp" \
   "${ROOT_DIR}/src/collectors/fan_collector.cpp" \
+  "${ROOT_DIR}/src/collectors/gpu_collector.cpp" \
   "${ROOT_DIR}/src/transports/stdout_transport.cpp" \
   "${ROOT_DIR}/src/transports/udp_transport.cpp" \
   -I"${ROOT_DIR}/src" \
   -pthread \
+  -lz \
   -o "${BIN_PATH}"
 
 verify_binary "${BIN_PATH}"

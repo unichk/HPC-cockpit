@@ -7,6 +7,7 @@ import socketserver
 import tempfile
 import threading
 import time
+import zlib
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
@@ -273,11 +274,31 @@ class StateStore:
         self._fake_node_ids = set()
 
     def ingest_snapshot(self, payload: bytes, remote_ip: str) -> None:
+        # Workers deflate the snapshot so it fits in one unfragmented datagram.
+        # Raw JSON starts with '{'; a zlib stream starts with a CMF byte, so
+        # the two are unambiguous and a worker and server can be upgraded in
+        # either order. A stream that claims to be zlib but will not inflate
+        # falls through to the JSON parse below and is reported there.
+        if payload[:1] != b"{":
+            try:
+                payload = zlib.decompress(payload)
+            except zlib.error:
+                pass
+
         try:
             parsed = json.loads(payload.decode("utf-8"))
-        except Exception:
+        except Exception as exc:
             with self._lock:
                 self._ingest_errors += 1
+                count = self._ingest_errors
+            # Log the first few and then every 100th, so a node emitting bad
+            # packets is obvious without flooding the console. Size is the
+            # useful clue: a payload at exactly the read limit was truncated.
+            if count <= 5 or count % 100 == 0:
+                print(
+                    f"ingest_error from={remote_ip} bytes={len(payload)} "
+                    f"errors={count} msg={exc}"
+                )
             return
 
         if not isinstance(parsed, dict):
@@ -964,9 +985,21 @@ class ApiHandler(SimpleHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
+class SnapshotUDPServer(socketserver.ThreadingUDPServer):
+    # socketserver defaults max_packet_size to 8192 and silently truncates
+    # anything larger, which then fails to parse and is counted as an ingest
+    # error rather than surfacing as "your packet is too big".
+    #
+    # A fully-populated node overruns that easily: IPMI thermal (~41 metrics),
+    # one row per chassis fan (~43) and per-GPU rows on an 8-GPU box (~69) add
+    # up to ~12 KB. Read up to the largest payload a single UDP datagram can
+    # carry (65507 bytes + slack) so snapshots arrive whole.
+    max_packet_size = 65535
+
+
 def start_udp_server(bind_host: str, bind_port: int, state: StateStore) -> socketserver.ThreadingUDPServer:
     UdpHandler.state = state
-    udp_server = socketserver.ThreadingUDPServer((bind_host, bind_port), UdpHandler)
+    udp_server = SnapshotUDPServer((bind_host, bind_port), UdpHandler)
     udp_server.daemon_threads = True
     return udp_server
 

@@ -23,6 +23,9 @@ add_executable(hpc_worker
   src/transports/udp_transport.cpp
 )
 
+find_package(ZLIB REQUIRED)
+target_link_libraries(hpc_worker PRIVATE ZLIB::ZLIB)
+
 target_include_directories(hpc_worker PRIVATE src)
 target_compile_options(hpc_worker PRIVATE -Wall -Wextra -Wpedantic -pthread)
 target_link_options(hpc_worker PRIVATE -pthread)
