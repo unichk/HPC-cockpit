@@ -211,7 +211,9 @@ class ThermalCollector : public Collector {
     Domain vr{"vr", 95.0, 105.0, {}};
     Domain board{"board", 80.0, 90.0, {}};
 
-    const bool ipmi_ok = CollectIpmi(cpu, dimm, nvme, psu, vr, board);
+    // GPU limits only: warn/crit with no reading of its own.
+    Reading gpu_limits{0.0, 0.0, 0.0};
+    const bool ipmi_ok = CollectIpmi(cpu, dimm, nvme, psu, vr, board, gpu_limits);
     // The BMC on this class of board exposes no NIC or chipset sensor, and its
     // NVMe rows are per-group aggregates. sysfs hwmon fills those gaps and
     // needs no lm-sensors package -- we read the kernel nodes directly.
@@ -240,6 +242,13 @@ class ThermalCollector : public Collector {
 
     out.push_back(Metric{"thermal", "available", 1.0, "bool"});
     last_available_ = true;
+
+    // Published without a matching gpu_max_c: there is deliberately no "gpu"
+    // thermal domain, since the gpu module carries the actual temperatures.
+    if (gpu_limits.warn_c > 0.0 && gpu_limits.crit_c > 0.0) {
+      out.push_back(Metric{"thermal", "gpu_warn_c", gpu_limits.warn_c, "celsius"});
+      out.push_back(Metric{"thermal", "gpu_crit_c", gpu_limits.crit_c, "celsius"});
+    }
 
     if (!cpu.readings.empty()) {
       out.push_back(Metric{"thermal", "cpu_package_max_c", Hottest(cpu).celsius, "celsius"});
@@ -336,7 +345,7 @@ class ThermalCollector : public Collector {
   // labels its slots by physical position, so mixing the two would double-
   // report the same die under two different indices.
   bool CollectIpmi(Domain& cpu, Domain& dimm, Domain& nvme, Domain& psu, Domain& vr,
-                   Domain& board) const {
+                   Domain& board, Reading& gpu_limits) const {
     std::string payload;
     if (!RunCommand("timeout 5s ipmitool sdr type Temperature 2>/dev/null", payload)) {
       return false;
@@ -367,6 +376,18 @@ class ThermalCollector : public Collector {
       // tested before the generic substrings they contain. VR_P0_SOC_TEMP is
       // a regulator, not a chipset; M2_AMB_TEMP is board air, not a drive.
       if (Contains(name, "GPU")) {
+        // The reading is discarded -- nvidia-smi owns GPU temperature, and the
+        // BMC indexes by physical slot rather than driver order. But its
+        // *limits* are the board vendor's, and nvidia-smi publishes none, so
+        // they are kept for consumers to score the driver's readings against.
+        // The tightest across the slots wins.
+        const Reading slot = MakeReading(name, celsius, board);
+        if (gpu_limits.crit_c <= 0.0 || slot.crit_c < gpu_limits.crit_c) {
+          gpu_limits.crit_c = slot.crit_c;
+        }
+        if (gpu_limits.warn_c <= 0.0 || slot.warn_c < gpu_limits.warn_c) {
+          gpu_limits.warn_c = slot.warn_c;
+        }
         continue;
       }
       Domain* target = nullptr;
