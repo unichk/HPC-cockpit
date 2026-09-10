@@ -6,8 +6,10 @@
 #include <cstdio>
 #include <dirent.h>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -61,16 +63,6 @@ bool Contains(const std::string& haystack, const char* needle) {
   return haystack.find(needle) != std::string::npos;
 }
 
-int AlertLevel(double value, double warn, double crit) {
-  if (value >= crit) {
-    return 2;
-  }
-  if (value >= warn) {
-    return 1;
-  }
-  return 0;
-}
-
 std::string ReadFileTrimmed(const std::string& path) {
   std::ifstream in(path);
   if (!in.is_open()) {
@@ -81,24 +73,135 @@ std::string ReadFileTrimmed(const std::string& path) {
   return Trim(line);
 }
 
-// One temperature domain: the readings collected for it plus the thresholds
-// used to score them. Emitted as <prefix>_max_c / <prefix>_count /
-// <prefix>_alert_level, alongside the <prefix>_warn_c / <prefix>_crit_c pair.
-struct Domain {
-  const char* prefix;
+// Millidegree sysfs attribute -> degrees, or `fallback` when absent/unparseable.
+double ReadHwmonMilliC(const std::string& path, double fallback) {
+  const std::string raw = ReadFileTrimmed(path);
+  if (raw.empty()) {
+    return fallback;
+  }
+  try {
+    const double value = std::stod(raw) / 1000.0;
+    return (value > 0.0 && value <= 250.0) ? value : fallback;
+  } catch (...) {
+    return fallback;
+  }
+}
+
+// One sensor: its reading and the warn/crit limits that apply to *it*.
+// Limits are per-sensor because sensors inside a single domain can differ
+// enormously -- on this chassis BPB_TEMP trips at 55/60 while HIC_TEMP_0 is
+// specified to 105/110, both of which are "board" temperatures.
+struct Reading {
+  double celsius;
   double warn_c;
   double crit_c;
-  std::vector<double> values;
 };
+
+// A temperature domain and the fallback limits used for any sensor in it whose
+// own limits the hardware does not publish.
+struct Domain {
+  const char* prefix;
+  double default_warn_c;
+  double default_crit_c;
+  std::vector<Reading> readings;
+};
+
+int AlertLevel(const Reading& reading) {
+  if (reading.celsius >= reading.crit_c) {
+    return 2;
+  }
+  if (reading.celsius >= reading.warn_c) {
+    return 1;
+  }
+  return 0;
+}
+
+// Per-sensor warn/crit as published by the BMC, keyed by upper-cased sensor
+// name. `ipmitool sdr -v type Temperature` reports these as "Upper
+// non-critical" and "Upper critical"; they are the board vendor's own limits
+// and are preferred over any value we could invent.
+//
+// Read once and cached: thresholds are static for the life of the machine, and
+// the verbose SDR walk is far too slow to repeat every interval.
+using ThresholdMap = std::map<std::string, std::pair<double, double>>;
+
+ThresholdMap LoadIpmiThresholds() {
+  ThresholdMap out;
+  std::string payload;
+  if (!RunCommand("timeout 60s ipmitool sdr -v type Temperature 2>/dev/null", payload)) {
+    return out;
+  }
+
+  std::istringstream stream(payload);
+  std::string line;
+  std::string current;
+  double warn = -1.0;
+  double crit = -1.0;
+
+  const auto flush = [&out, &current, &warn, &crit]() {
+    if (!current.empty() && (warn > 0.0 || crit > 0.0)) {
+      // A sensor may publish only one of the two; fill the other in relative to
+      // it so we never compare a reading against a zero limit. Order the pair
+      // defensively -- a warn above crit would make the warn level
+      // unreachable and every crossing read as critical.
+      const double w = warn > 0.0 ? warn : crit;
+      const double c = crit > 0.0 ? crit : warn;
+      out[current] = {std::min(w, c), std::max(w, c)};
+    }
+    current.clear();
+    warn = -1.0;
+    crit = -1.0;
+  };
+
+  const auto value_after_colon = [](const std::string& text, double& value) {
+    const auto colon = text.find(':');
+    if (colon == std::string::npos) {
+      return false;
+    }
+    try {
+      value = std::stod(Trim(text.substr(colon + 1)));
+    } catch (...) {
+      return false;
+    }
+    return true;
+  };
+
+  while (std::getline(stream, line)) {
+    const std::string trimmed = Trim(line);
+    if (trimmed.rfind("Sensor ID", 0) == 0) {
+      flush();
+      const auto colon = trimmed.find(':');
+      if (colon == std::string::npos) {
+        continue;
+      }
+      std::string name = Trim(trimmed.substr(colon + 1));
+      // "CPU0_TEMP (0x1)" -> "CPU0_TEMP"
+      const auto paren = name.find(" (");
+      if (paren != std::string::npos) {
+        name = Trim(name.substr(0, paren));
+      }
+      current = ToUpper(name);
+      continue;
+    }
+    if (trimmed.rfind("Upper non-critical", 0) == 0) {
+      value_after_colon(trimmed, warn);
+    } else if (trimmed.rfind("Upper critical", 0) == 0) {
+      value_after_colon(trimmed, crit);
+    }
+  }
+  flush();
+  return out;
+}
 
 class ThermalCollector : public Collector {
  public:
   std::string Name() const override { return "thermal"; }
 
   bool Collect(std::vector<Metric>& out, std::string& error) override {
-    // Domain thresholds. CPU/NVMe/NIC/chipset keep the values the previous
-    // lm-sensors implementation used so existing dashboard thresholds and
-    // saved settings keep their meaning.
+    // Fallback limits, used only for sensors whose own limits the hardware
+    // does not publish. Kept at the values the previous lm-sensors
+    // implementation used so behaviour is unchanged where nothing better
+    // is available.
     Domain cpu{"cpu", 80.0, 90.0, {}};
     Domain dimm{"dimm", 80.0, 90.0, {}};
     Domain nvme{"nvme", 70.0, 80.0, {}};
@@ -109,14 +212,20 @@ class ThermalCollector : public Collector {
     Domain board{"board", 80.0, 90.0, {}};
 
     const bool ipmi_ok = CollectIpmi(cpu, dimm, nvme, psu, vr, board);
-    // The BMC on this class of board exposes no NIC or chipset sensor, and
-    // its NVMe rows are per-group aggregates. sysfs hwmon fills those gaps
-    // and needs no lm-sensors package — we read the kernel nodes directly.
+    // The BMC on this class of board exposes no NIC or chipset sensor, and its
+    // NVMe rows are per-group aggregates. sysfs hwmon fills those gaps and
+    // needs no lm-sensors package -- we read the kernel nodes directly.
     CollectHwmon(cpu, nvme, nic, chipset);
 
-    const bool any = !cpu.values.empty() || !dimm.values.empty() || !nvme.values.empty() ||
-                     !nic.values.empty() || !chipset.values.empty() || !psu.values.empty() ||
-                     !vr.values.empty() || !board.values.empty();
+    Domain* domains[] = {&cpu, &dimm, &nvme, &nic, &chipset, &psu, &vr, &board};
+
+    bool any = false;
+    for (const Domain* domain : domains) {
+      if (!domain->readings.empty()) {
+        any = true;
+        break;
+      }
+    }
     if (!any) {
       out.push_back(Metric{"thermal", "available", 0.0, "bool"});
       if (last_available_) {
@@ -132,52 +241,102 @@ class ThermalCollector : public Collector {
     out.push_back(Metric{"thermal", "available", 1.0, "bool"});
     last_available_ = true;
 
-    // Per-socket CPU packages stay individually addressable; the dashboard
-    // reads cpu_package0_c and cpu_package_max_c.
-    for (std::size_t index = 0; index < cpu.values.size(); ++index) {
-      out.push_back(Metric{"thermal", "cpu_package" + std::to_string(index) + "_c",
-                           cpu.values[index], "celsius"});
-    }
-    if (!cpu.values.empty()) {
-      const double cpu_max = *std::max_element(cpu.values.begin(), cpu.values.end());
-      out.push_back(Metric{"thermal", "cpu_package_max_c", cpu_max, "celsius"});
+    if (!cpu.readings.empty()) {
+      out.push_back(Metric{"thermal", "cpu_package_max_c", Hottest(cpu).celsius, "celsius"});
     }
 
-    for (const Domain* domain : {&cpu, &dimm, &nvme, &nic, &chipset, &psu, &vr, &board}) {
+    for (const Domain* domain : domains) {
       const std::string prefix(domain->prefix);
-      out.push_back(Metric{"thermal", prefix + "_warn_c", domain->warn_c, "celsius"});
-      out.push_back(Metric{"thermal", prefix + "_crit_c", domain->crit_c, "celsius"});
-      if (domain->values.empty()) {
+      // Per-sensor metric stem. CPU keeps "cpu_package<N>" because the
+      // dashboard, live-data.js and the detail page already read those names;
+      // every other domain is just "<prefix><N>".
+      const std::string stem = (prefix == "cpu") ? "cpu_package" : prefix;
+      if (domain->readings.empty()) {
+        // No sensor: emit nothing at all, so the UI can distinguish "domain
+        // absent" from "domain reads 0". Publishing thresholds for a domain
+        // that has no reading only invites them being rendered as data.
         continue;
       }
-      const double max_c = *std::max_element(domain->values.begin(), domain->values.end());
-      // chipset is a single-sensor domain — keep its historical metric name.
+
+      const Reading& hottest = Hottest(*domain);
       if (prefix == "chipset") {
-        out.push_back(Metric{"thermal", "chipset_c", max_c, "celsius"});
+        // Single-sensor domain -- keep its historical metric name.
+        out.push_back(Metric{"thermal", "chipset_c", hottest.celsius, "celsius"});
       } else {
-        out.push_back(Metric{"thermal", prefix + "_max_c", max_c, "celsius"});
+        out.push_back(Metric{"thermal", prefix + "_max_c", hottest.celsius, "celsius"});
       }
+
+      // The published pair belongs to the hottest sensor, so the value and the
+      // limits shown beside it always describe the same physical sensor. Taking
+      // the tightest limit across a mixed domain would flag the board domain as
+      // critical purely because BPB_TEMP's 60 C ceiling sits below HIC_TEMP's
+      // normal running temperature.
+      out.push_back(Metric{"thermal", prefix + "_warn_c", hottest.warn_c, "celsius"});
+      out.push_back(Metric{"thermal", prefix + "_crit_c", hottest.crit_c, "celsius"});
       out.push_back(Metric{"thermal", prefix + "_count",
-                           static_cast<double>(domain->values.size()), "count"});
-      out.push_back(Metric{"thermal", prefix + "_alert_level",
-                           static_cast<double>(AlertLevel(max_c, domain->warn_c, domain->crit_c)),
-                           "level"});
+                           static_cast<double>(domain->readings.size()), "count"});
+
+      // Scored per sensor against that sensor's own limits, then reduced to the
+      // worst -- a cool sensor with a low ceiling is not masked by a hot sensor
+      // with a high one.
+      int worst = 0;
+      for (const Reading& reading : domain->readings) {
+        worst = std::max(worst, AlertLevel(reading));
+      }
+      out.push_back(Metric{"thermal", prefix + "_alert_level", static_cast<double>(worst), "level"});
+
+      // Every individual sensor, in the order the BMC lists them within the
+      // domain, each with its own limits. Sensors inside one domain can have
+      // very different ceilings, so a per-sensor reading is only interpretable
+      // alongside its own pair. This is what lets the UI show a zone-by-zone
+      // view instead of a single domain maximum; it costs ~2 KB of JSON, which
+      // is ~200 bytes on the wire once deflated.
+      for (std::size_t index = 0; index < domain->readings.size(); ++index) {
+        const Reading& reading = domain->readings[index];
+        const std::string base = stem + std::to_string(index);
+        out.push_back(Metric{"thermal", base + "_c", reading.celsius, "celsius"});
+        // Only publish a sensor's own limits when they differ from the
+        // domain-level pair the consumer already has; otherwise it would be
+        // the same two numbers repeated for every sensor. Homogeneous domains
+        // (all 8 DIMM zones share 85/87) then cost one metric per sensor
+        // instead of three, which is what keeps the snapshot inside a single
+        // unfragmented datagram. Consumers fall back to <domain>_warn_c.
+        if (reading.warn_c != hottest.warn_c || reading.crit_c != hottest.crit_c) {
+          out.push_back(Metric{"thermal", base + "_warn_c", reading.warn_c, "celsius"});
+          out.push_back(Metric{"thermal", base + "_crit_c", reading.crit_c, "celsius"});
+        }
+      }
     }
 
     return true;
   }
 
  private:
+  static const Reading& Hottest(const Domain& domain) {
+    return *std::max_element(domain.readings.begin(), domain.readings.end(),
+                             [](const Reading& a, const Reading& b) { return a.celsius < b.celsius; });
+  }
+
+  // Look up a BMC sensor's published limits, falling back to the domain's
+  // defaults when the hardware does not specify them.
+  Reading MakeReading(const std::string& sensor_name, double celsius, const Domain& domain) const {
+    const auto found = ipmi_thresholds_.find(sensor_name);
+    if (found != ipmi_thresholds_.end()) {
+      return Reading{celsius, found->second.first, found->second.second};
+    }
+    return Reading{celsius, domain.default_warn_c, domain.default_crit_c};
+  }
+
   // Read every analogue temperature row the BMC reports and bucket it by
   // sensor name. Rows with no reading ("ns" / "No Reading") are headers for
-  // hardware that isn't installed and are skipped.
+  // hardware that is not installed and are skipped.
   //
   // GPU rows are deliberately ignored: nvidia-smi owns GPU telemetry (it is
   // faster, per-device and always in the driver's own indexing), and the BMC
   // labels its slots by physical position, so mixing the two would double-
   // report the same die under two different indices.
-  static bool CollectIpmi(Domain& cpu, Domain& dimm, Domain& nvme, Domain& psu, Domain& vr,
-                          Domain& board) {
+  bool CollectIpmi(Domain& cpu, Domain& dimm, Domain& nvme, Domain& psu, Domain& vr,
+                   Domain& board) const {
     std::string payload;
     if (!RunCommand("timeout 5s ipmitool sdr type Temperature 2>/dev/null", payload)) {
       return false;
@@ -210,21 +369,25 @@ class ThermalCollector : public Collector {
       if (Contains(name, "GPU")) {
         continue;
       }
+      Domain* target = nullptr;
       if (Contains(name, "VR_") || Contains(name, "VRM") || Contains(name, "VCCIN") ||
           Contains(name, "PVDD")) {
-        vr.values.push_back(celsius);
+        target = &vr;
       } else if (Contains(name, "PSU") || Contains(name, "PS1_") || Contains(name, "PS2_")) {
-        psu.values.push_back(celsius);
+        target = &psu;
       } else if (Contains(name, "DIMM") || Contains(name, "MEM")) {
-        dimm.values.push_back(celsius);
+        target = &dimm;
       } else if (Contains(name, "AMB") || Contains(name, "INLET") || Contains(name, "OUTLET") ||
                  Contains(name, "BPB") || Contains(name, "HIC") || Contains(name, "BOARD") ||
                  Contains(name, "PERIPHERAL")) {
-        board.values.push_back(celsius);
+        target = &board;
       } else if (Contains(name, "NVME") || Contains(name, "SSD") || Contains(name, "HDD")) {
-        nvme.values.push_back(celsius);
+        target = &nvme;
       } else if (Contains(name, "CPU") && !Contains(name, "FAN")) {
-        cpu.values.push_back(celsius);
+        target = &cpu;
+      }
+      if (target != nullptr) {
+        target->readings.push_back(MakeReading(name, celsius, *target));
       }
     }
     return true;
@@ -233,14 +396,17 @@ class ThermalCollector : public Collector {
   // Walk /sys/class/hwmon for the domains the BMC does not cover. This is the
   // same data lm-sensors would print, read straight from the kernel so the
   // worker has no dependency on the lm-sensors package being installed.
-  static void CollectHwmon(Domain& cpu, Domain& nvme, Domain& nic, Domain& chipset) {
+  //
+  // Drivers expose their own limits as tempN_max (warn) and tempN_crit, which
+  // are used in preference to the domain defaults exactly as the BMC's are.
+  void CollectHwmon(Domain& cpu, Domain& nvme, Domain& nic, Domain& chipset) const {
     DIR* dir = opendir("/sys/class/hwmon");
     if (dir == nullptr) {
       return;
     }
 
-    std::vector<double> hwmon_cpu;
-    std::vector<double> hwmon_nvme;
+    std::vector<Reading> hwmon_cpu;
+    std::vector<Reading> hwmon_nvme;
 
     while (const dirent* entry = readdir(dir)) {
       const std::string entry_name = entry->d_name;
@@ -264,7 +430,7 @@ class ThermalCollector : public Collector {
         continue;
       }
 
-      // temp1_input .. temp<N>_input, scaled millidegrees → degrees.
+      // temp1_input .. temp<N>_input, scaled millidegrees -> degrees.
       for (int index = 1; index <= 32; ++index) {
         const std::string stem = base + "/temp" + std::to_string(index);
         const std::string raw = ReadFileTrimmed(stem + "_input");
@@ -281,21 +447,33 @@ class ThermalCollector : public Collector {
           continue;
         }
 
+        const Domain& owner = is_nic ? nic : is_chipset ? chipset : is_cpu ? cpu : nvme;
+        // tempN_crit is unambiguous, but tempN_max is not a portable "warning"
+        // level: nvme reports max 76.85 below crit 84.85, while the igb/i350
+        // driver reports max 120 *above* crit 110. Only trust _max as the warn
+        // level when it actually sits below _crit; otherwise keep the domain
+        // default, then clamp so warn can never exceed crit.
+        const double crit = ReadHwmonMilliC(stem + "_crit", owner.default_crit_c);
+        const double max_attr = ReadHwmonMilliC(stem + "_max", -1.0);
+        double warn = (max_attr > 0.0 && max_attr < crit) ? max_attr : owner.default_warn_c;
+        warn = std::min(warn, crit);
+        const Reading reading{celsius, warn, crit};
+
         if (is_nic) {
-          nic.values.push_back(celsius);
+          nic.readings.push_back(reading);
         } else if (is_chipset) {
-          chipset.values.push_back(celsius);
+          chipset.readings.push_back(reading);
         } else if (is_cpu) {
           // k10temp exposes Tctl plus optional Tdie/Tccd sensors; only the
           // first (control) reading represents the package.
           if (index == 1) {
-            hwmon_cpu.push_back(celsius);
+            hwmon_cpu.push_back(reading);
           }
-        } else if (is_nvme) {
-          // temp1 is the drive's Composite; higher indices are vendor
-          // sensors that run hotter and would skew the domain max.
+        } else {
+          // temp1 is the drive's Composite; higher indices are vendor sensors
+          // that run hotter and would skew the domain.
           if (index == 1) {
-            hwmon_nvme.push_back(celsius);
+            hwmon_nvme.push_back(reading);
           }
         }
       }
@@ -305,15 +483,17 @@ class ThermalCollector : public Collector {
     // In-band readings are a fallback for these two: the BMC's values are
     // authoritative when present (its NVMe rows aggregate a whole group, and
     // its CPU rows come from the same die sensor via the SMBus).
-    if (cpu.values.empty()) {
-      cpu.values = hwmon_cpu;
+    if (cpu.readings.empty()) {
+      cpu.readings = std::move(hwmon_cpu);
     }
-    if (nvme.values.empty()) {
-      nvme.values = hwmon_nvme;
+    if (nvme.readings.empty()) {
+      nvme.readings = std::move(hwmon_nvme);
     }
   }
 
   bool last_available_ = true;
+  // Populated once, at construction: static for the life of the machine.
+  ThresholdMap ipmi_thresholds_ = LoadIpmiThresholds();
 };
 
 }  // namespace
