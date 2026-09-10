@@ -2,10 +2,14 @@
 
 #include <dirent.h>
 
+#include <array>
 #include <cctype>
+#include <cstdio>
 #include <fstream>
+#include <regex>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -121,11 +125,85 @@ void CollectCores(std::vector<Metric>& out) {
   }
 }
 
+// Per-socket CPU package power, read from AMD's E-SMI tool. Nothing in
+// /proc or /sys exposes this on EPYC without root: the RAPL energy counters
+// under /sys/class/powercap are 0400 (the Platypus side-channel mitigation),
+// and the amd_energy driver is not loaded. e_smi_tool talks to the SMU
+// directly, needs no privileges and returns in ~10 ms, so it is cheap enough
+// to call every interval.
+//
+// Output is a fixed-width table, one column per socket:
+//   | Power (Watts)      | 285.471    | 105.564    |
+//   | PowerLimit (Watts) | 500.000    | 500.000    |
+void CollectSocketPower(std::vector<Metric>& out) {
+  std::array<char, 4096> buffer{};
+  std::string payload;
+  FILE* pipe = popen("timeout 3s e_smi_tool --showsockpower 2>/dev/null", "r");
+  if (pipe == nullptr) {
+    return;
+  }
+  while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+    payload.append(buffer.data());
+  }
+  if (pclose(pipe) != 0 || payload.empty()) {
+    return;
+  }
+
+  // Pull every numeric cell out of the row whose label matches, so the same
+  // parse works for 1, 2 or 4 sockets.
+  const auto row_values = [&payload](const std::string& label) {
+    std::vector<double> values;
+    std::istringstream stream(payload);
+    std::string line;
+    while (std::getline(stream, line)) {
+      if (line.find(label) == std::string::npos) {
+        continue;
+      }
+      const std::regex number(R"(([0-9]+\.[0-9]+|[0-9]+))");
+      for (auto it = std::sregex_iterator(line.begin(), line.end(), number);
+           it != std::sregex_iterator(); ++it) {
+        try {
+          values.push_back(std::stod(it->str()));
+        } catch (...) {
+        }
+      }
+      break;
+    }
+    return values;
+  };
+
+  const std::vector<double> watts = row_values("Power (Watts)");
+  if (watts.empty()) {
+    return;
+  }
+  double total = 0.0;
+  for (std::size_t index = 0; index < watts.size(); ++index) {
+    out.push_back(Metric{"cpu", "socket" + std::to_string(index) + "_power_w", watts[index], "watt"});
+    total += watts[index];
+  }
+  out.push_back(Metric{"cpu", "package_power_w", total, "watt"});
+  out.push_back(Metric{"cpu", "socket_count", static_cast<double>(watts.size()), "count"});
+
+  const std::vector<double> limits = row_values("PowerLimit (Watts)");
+  if (!limits.empty()) {
+    double limit_total = 0.0;
+    for (const double value : limits) {
+      limit_total += value;
+    }
+    out.push_back(Metric{"cpu", "package_power_limit_w", limit_total, "watt"});
+  }
+}
+
 class CpuCollector : public Collector {
  public:
   std::string Name() const override { return "cpu"; }
 
   bool Collect(std::vector<Metric>& out, std::string& error) override {
+    // Before the usage calculation: that needs two samples for a delta and
+    // returns early on the first tick, whereas socket power is a point read
+    // and should be reported from the very first snapshot.
+    CollectSocketPower(out);
+
     std::ifstream in("/proc/stat");
     if (!in.is_open()) {
       error = "failed to open /proc/stat";
