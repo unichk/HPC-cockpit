@@ -603,9 +603,16 @@ function SettingsApp() {
               }));
               const handleWarn = v => setGroupAlert("nodePowerWarn", Math.min(v, ga.nodePowerHot - 50));
               const handleCrit = v => setGroupAlert("nodePowerHot",  Math.max(v, ga.nodePowerWarn + 50));
-              const min = 100, max = 3000, step = 50;
-              const wPct = ((ga.nodePowerWarn - min) / (max - min)) * 100;
-              const cPct = ((ga.nodePowerHot  - min) / (max - min)) * 100;
+              // Warn and crit have separate ceilings: an 8-GPU node can draw
+              // well past the old shared 3000 W limit, and crit needs headroom
+              // above whatever warn is set to.
+              const min = 100, step = 50, warnMax = 3500, critMax = 4500;
+              // Both markers share one track, so normalise against the highest
+              // value either handle can reach. Clamped so a stored setting
+              // outside the range cannot push a marker off the bar.
+              const pct = v => Math.max(0, Math.min(100, ((v - min) / (critMax - min)) * 100));
+              const wPct = pct(ga.nodePowerWarn);
+              const cPct = pct(ga.nodePowerHot);
               return (
                 <div className="dual-row" key={g.id}>
                   <div className="setting-label">
@@ -622,12 +629,12 @@ function SettingsApp() {
                     </div>
                     <div className="dual-slider-row">
                       <span className="dual-slider-tone warn">Warn</span>
-                      <ThresholdSlider value={ga.nodePowerWarn} min={min} max={max - step} step={step} tone="warn" onChange={handleWarn} />
+                      <ThresholdSlider value={ga.nodePowerWarn} min={min} max={warnMax} step={step} tone="warn" onChange={handleWarn} />
                       <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 600, marginLeft: -6 }}>W</span>
                     </div>
                     <div className="dual-slider-row">
                       <span className="dual-slider-tone crit">Crit</span>
-                      <ThresholdSlider value={ga.nodePowerHot} min={min + step} max={max} step={step} tone="crit" onChange={handleCrit} />
+                      <ThresholdSlider value={ga.nodePowerHot} min={min + step} max={critMax} step={step} tone="crit" onChange={handleCrit} />
                       <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 600, marginLeft: -6 }}>W</span>
                     </div>
                   </div>

@@ -53,10 +53,103 @@
       .nd-bar-track { height: 10px; border-radius: 999px; background: var(--line); overflow: hidden; position: relative; }
       .nd-bar-fill { position: absolute; inset: 0 auto 0 0; border-radius: 999px; transition: width 400ms ease; }
 
-      .nd-chart { width: 100%; overflow: hidden; }
+      .nd-chart { width: 100%; overflow: hidden; position: relative; }
       .nd-chart svg { display: block; width: 100%; }
+      /* Scale labels read as a right-hand axis: top value at the top, bottom
+         value at the bottom. Small surface-coloured chip so they stay legible
+         where the trace runs behind them. */
+      .nd-chart-axis { position: absolute; right: 0; font-size: 9px; font-weight: 600; color: var(--muted);
+        font-variant-numeric: tabular-nums; line-height: 1.2; padding: 0 3px; border-radius: 3px;
+        background: var(--surface); pointer-events: none; }
+      .nd-chart-axis.top { top: 0; }
+      .nd-chart-axis.bottom { bottom: 0; }
+      /* Hover readout: crosshair, a dot on the trace, and a value/time chip. */
+      .nd-chart-cross { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line);
+        transform: translateX(-0.5px); pointer-events: none; }
+      .nd-chart-dot { position: absolute; width: 7px; height: 7px; border-radius: 50%;
+        transform: translate(-50%, -50%); box-shadow: 0 0 0 2px var(--surface); pointer-events: none; }
+      .nd-chart-tip { position: absolute; top: 2px; left: 50%; transform: translateX(-50%);
+        background: var(--ink); color: var(--surface); border-radius: 5px; padding: 3px 6px;
+        display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+        width: max-content; pointer-events: none; z-index: 5; box-shadow: var(--shadow-sm); }
+      .nd-chart-tip-val { font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1.1; }
+      .nd-chart-tip-time { font-size: 8.5px; font-weight: 600; opacity: 0.75; font-variant-numeric: tabular-nums; }
 
       .nd-fan-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px; }
+      /* Thermal domains: one sub-panel per domain, 2 columns x 4 rows. */
+      /* grid-auto-rows:1fr makes every row the height of the tallest one, so
+         all 8 panels end up identical rather than each row sizing to its own
+         content (DIMM's two cell rows made row 1 taller than the rest). */
+      .nd-therm-grid { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr; gap: 7px; }
+      .nd-therm-panel { border: 1px solid var(--line); border-radius: var(--radius-md); padding: 7px 9px; display: flex; flex-direction: column; gap: 5px; }
+      .nd-therm-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+      .nd-therm-name { font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; color: var(--ink); }
+      .nd-therm-meta { font-size: 9px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+      .nd-therm-slot { flex: 1 1 auto; min-height: 38px; border: 1px dashed var(--line); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 9.5px; color: var(--muted); letter-spacing: 0.04em; text-align: center; padding: 4px; }
+      .nd-therm-slot.filled { border: none; border-radius: 0; padding: 0; display: flex; align-items: stretch; }
+      .nd-therm-panel.absent { opacity: 0.5; }
+      /* Per-socket CPU cells. auto-fit so a 1-, 2-, 4- or 8-socket box all
+         lay out side by side and wrap instead of shrinking to nothing. */
+      .nd-cpu-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(56px, 1fr)); grid-auto-rows: 1fr; gap: 4px; flex: 1; }
+      /* DIMM zones: 4 across, so 8 groups fall into 2 rows. */
+      .nd-zone-grid { display: grid; grid-template-columns: repeat(4, 1fr); grid-auto-rows: 1fr; gap: 4px; flex: 1; }
+      /* Single-sensor domain: one cell filling the whole panel. Reuses
+         .nd-cpu-cell so the tint rules apply, just scaled up. */
+      .nd-full-grid { display: grid; grid-template-columns: 1fr; grid-auto-rows: 1fr; flex: 1; }
+      /* Three across: the 6 VR sensors land as 2 sockets (rows) x 3 rails. */
+      .nd-tri-grid { display: grid; grid-template-columns: repeat(3, 1fr); grid-auto-rows: 1fr; gap: 4px; flex: 1; }
+      /* Five across: the board sensors in a single row. */
+      .nd-penta-grid { display: grid; grid-template-columns: repeat(5, 1fr); grid-auto-rows: 1fr; gap: 3px; flex: 1; }
+      .nd-full-grid .nd-cpu-val { font-size: 22px; gap: 2px; }
+      .nd-full-grid .nd-cpu-val .u { font-size: 11px; }
+      .nd-zone-cell { border-radius: 5px; padding: 4px 3px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+        background: color-mix(in oklab, var(--ok) 12%, var(--surface-2));
+        border: 1px solid color-mix(in oklab, var(--ok) 25%, var(--line)); }
+      .nd-zone-val { font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1; color: var(--ok); display: flex; align-items: baseline; justify-content: center; gap: 1px; }
+      .nd-zone-val .u { font-size: 8.5px; font-weight: 600; color: var(--muted); }
+      .nd-zone-cell.warn { background: color-mix(in oklab, var(--warn) 16%, var(--surface-2));
+        border-color: color-mix(in oklab, var(--warn) 32%, var(--line)); }
+      .nd-zone-cell.warn .nd-zone-val { color: var(--warn); }
+      .nd-zone-cell.crit { background: color-mix(in oklab, var(--crit) 18%, var(--surface-2));
+        border-color: color-mix(in oklab, var(--crit) 38%, var(--line)); }
+      .nd-zone-cell.crit .nd-zone-val { color: var(--crit); }
+      /* Custom hover card. Neither .nd-card nor .nd-therm-panel sets overflow,
+         so an absolutely-positioned popover escapes them cleanly. */
+      .nd-tip { position: relative; }
+      .nd-tip-pop { position: absolute; bottom: calc(100% + 7px); left: 50%; transform: translateX(-50%) translateY(3px);
+        background: var(--ink); color: var(--surface); padding: 7px 9px; border-radius: 6px;
+        width: max-content; max-width: 210px; text-align: left; z-index: 60;
+        opacity: 0; visibility: hidden; pointer-events: none;
+        transition: opacity 0.12s ease, transform 0.12s ease; box-shadow: var(--shadow-md); }
+      .nd-tip-pop::after { content: ""; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+        border: 5px solid transparent; border-top-color: var(--ink); }
+      .nd-tip:hover .nd-tip-pop { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
+      /* A popover centred on an edge cell overhangs the card and gets clipped
+         by the page. Cells in the first and last column anchor their popover to
+         that edge instead, with the arrow moved to sit over the cell. The
+         renderer tags them from the grid's column count. */
+      .nd-tip.tip-start .nd-tip-pop { left: 0; right: auto; transform: translateX(0) translateY(3px); }
+      .nd-tip.tip-start:hover .nd-tip-pop { transform: translateX(0) translateY(0); }
+      .nd-tip.tip-start .nd-tip-pop::after { left: 14px; transform: translateX(-50%); }
+      .nd-tip.tip-end .nd-tip-pop { left: auto; right: 0; transform: translateX(0) translateY(3px); }
+      .nd-tip.tip-end:hover .nd-tip-pop { transform: translateX(0) translateY(0); }
+      .nd-tip.tip-end .nd-tip-pop::after { left: auto; right: 14px; transform: translateX(50%); }
+      .nd-tip-name { display: block; font-size: 10.5px; font-weight: 800; letter-spacing: 0.02em; }
+      .nd-tip-desc { display: block; font-size: 9.5px; font-weight: 500; line-height: 1.35; opacity: 0.8; margin-top: 2px; }
+      /* State is carried by the cell's own background, not a bar. */
+      .nd-cpu-cell { border-radius: 6px; padding: 5px 6px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+        background: color-mix(in oklab, var(--ok) 12%, var(--surface-2));
+        border: 1px solid color-mix(in oklab, var(--ok) 25%, var(--line)); }
+      .nd-cpu-val { font-size: 17px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1; color: var(--ok); display: flex; align-items: baseline; justify-content: center; gap: 1px; }
+      .nd-cpu-val .u { font-size: 10px; font-weight: 600; color: var(--muted); }
+      .nd-cpu-cell.warn { background: color-mix(in oklab, var(--warn) 16%, var(--surface-2));
+        border-color: color-mix(in oklab, var(--warn) 32%, var(--line)); }
+      .nd-cpu-cell.warn .nd-cpu-val { color: var(--warn); }
+      .nd-cpu-cell.crit { background: color-mix(in oklab, var(--crit) 18%, var(--surface-2));
+        border-color: color-mix(in oklab, var(--crit) 38%, var(--line)); }
+      .nd-cpu-cell.crit .nd-cpu-val { color: var(--crit); }
+      .nd-therm-panel.warn { border-color: var(--warn); }
+      .nd-therm-panel.crit { border-color: var(--crit); }
       .nd-fan-chip { padding: 6px 4px; border-radius: 7px; display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 10px; font-weight: 700; border: 1px solid var(--line); }
       .nd-fan-chip.ok { background: color-mix(in oklab, var(--ok) 12%, var(--surface-2)); color: var(--ok); border-color: color-mix(in oklab, var(--ok) 25%, var(--line)); }
       .nd-fan-chip.fail { background: color-mix(in oklab, var(--crit) 12%, var(--surface-2)); color: var(--crit); border-color: color-mix(in oklab, var(--crit) 25%, var(--line)); }
@@ -80,6 +173,7 @@
         .nd-summary { grid-template-columns: repeat(4, 1fr); }
         .nd-body { grid-template-columns: 1fr; }
         .nd-fan-grid { grid-template-columns: repeat(4, 1fr); }
+        .nd-therm-grid { grid-template-columns: 1fr; }
       }
 
       .nd-modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.5); backdrop-filter: blur(3px); z-index: 500; display: flex; align-items: center; justify-content: center; }
@@ -123,7 +217,7 @@
     <script src="vendor/babel.min.js"></script>
     <script src="live-data.js?v=8"></script>
     <script type="text/babel">
-      const { useState, useEffect, useMemo } = React;
+      const { useState, useEffect, useMemo, useRef } = React;
       const THR = window.DEFAULT_THRESHOLDS;
       const tone = (v, warn, crit) => v >= crit ? "crit" : v >= warn ? "warn" : "";
       const formatMhz = (mhz) => mhz >= 1000 ? `${(mhz / 1000).toFixed(2)} GHz` : `${Math.round(mhz)} MHz`;
@@ -134,22 +228,52 @@
         return now;
       }
 
-      function MiniChart({ values, color = "var(--accent)", height = 56 }) {
+      // yMin/yMax pin the vertical scale. Without them the chart auto-fits the
+      // data, which makes idle noise look like huge swings and means the shape
+      // changes meaning between refreshes. With them the height is comparable
+      // over time and against the thresholds.
+      function MiniChart({ values, color = "var(--accent)", height = 56, yMin, yMax,
+                           times, unit = "", digits = 0 }) {
+        // hover = { i, w }: the sample index plus the container width at the
+        // time of the move, so the readout can be clamped in real units.
+        const [hover, setHover] = useState(null);
+        const tipRef = useRef(null);
+        const [tipW, setTipW] = useState(0);
+        // Measure the chip so it can be nudged inward by exactly its own
+        // half-width. Runs every render and settles immediately; guessing a
+        // percentage threshold instead made it jump inward far too early.
+        useEffect(() => {
+          const el = tipRef.current;
+          if (!el) return;
+          const w = el.offsetWidth;
+          if (w && Math.abs(w - tipW) > 1) setTipW(w);
+        });
         if (!values || values.length < 2) return null;
         const W = 600, H = height * 3;
-        const mn = Math.min(...values), mx = Math.max(...values);
+        const mn = typeof yMin === "number" ? yMin : Math.min(...values);
+        const mx = typeof yMax === "number" ? yMax : Math.max(...values);
         const rng = Math.max(1, mx - mn);
         const pad = 6;
         const pts = values.map((v, i) => {
           const x = pad + (i / (values.length - 1)) * (W - pad * 2);
-          const y = H - pad - ((v - mn) / rng) * (H - pad * 2);
+          // Clamp to the domain so a reading past the ceiling rides the top
+          // edge instead of drawing outside the viewBox.
+          const cv = Math.max(mn, Math.min(mx, v));
+          const y = H - pad - ((cv - mn) / rng) * (H - pad * 2);
           return [x, y];
         });
         const line = pts.map((p, i) => (i === 0 ? `M${p[0]},${p[1]}` : `L${p[0]},${p[1]}`)).join(" ");
         const area = `${line} L${pts[pts.length-1][0]},${H} L${pts[0][0]},${H} Z`;
         const gradId = `g${Math.abs(color.split("").reduce((a,c)=>a+c.charCodeAt(0),0))}`;
         return (
-          <div className="nd-chart">
+          <div className="nd-chart"
+            onMouseMove={e => {
+              const r = e.currentTarget.getBoundingClientRect();
+              if (r.width <= 0) return;
+              const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+              setHover({ i: Math.round(frac * (values.length - 1)), w: r.width });
+            }}
+            onMouseLeave={() => setHover(null)}>
             <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ height }}>
               <defs>
                 <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
@@ -161,9 +285,37 @@
               <path d={line} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
               <circle cx={pts[pts.length-1][0]} cy={pts[pts.length-1][1]} r="4" fill={color} />
             </svg>
-            <div style={{ display:"flex", justifyContent:"space-between", fontSize:9, color:"var(--muted)", marginTop:2, fontVariantNumeric:"tabular-nums" }}>
-              <span>{mn.toFixed(0)}</span><span>{mx.toFixed(0)}</span>
-            </div>
+            {hover === null && <span className="nd-chart-axis top">{mx.toFixed(0)}</span>}
+            <span className="nd-chart-axis bottom">{mn.toFixed(0)}</span>
+            {hover !== null && pts[hover.i] && (() => {
+              const hi = hover.i;
+              // Percentages of the viewBox, so the marker tracks the trace
+              // correctly despite preserveAspectRatio="none" scaling x and y
+              // by different factors.
+              const xPct = (pts[hi][0] / W) * 100;
+              const yPct = (pts[hi][1] / H) * 100;
+              // Fall back to reconstructing the time from the poll interval if
+              // the series predates timestamped history.
+              const ts = (times && times[hi] != null)
+                ? times[hi]
+                : Date.now() - (values.length - 1 - hi) * (window.POLL_MS || 1500);
+              const clock = new Date(ts).toLocaleTimeString([], { hour12: false });
+              // Stay centred on the cursor, sliding inward only by as much as
+              // is needed to keep the chip inside the chart. No flipping, so
+              // there is no snap partway across.
+              const halfPct = (hover.w > 0 && tipW > 0) ? (tipW / 2 / hover.w) * 100 : 0;
+              const leftPct = Math.max(halfPct, Math.min(100 - halfPct, xPct));
+              return (
+                <>
+                  <div className="nd-chart-cross" style={{ left: `${xPct}%` }} />
+                  <div className="nd-chart-dot" style={{ left: `${xPct}%`, top: `${yPct}%`, background: color }} />
+                  <div ref={tipRef} className="nd-chart-tip" style={{ left: `${leftPct}%` }}>
+                    <span className="nd-chart-tip-val">{values[hi].toFixed(digits)}{unit}</span>
+                    <span className="nd-chart-tip-time">{clock}</span>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         );
       }
@@ -1631,7 +1783,18 @@
         const cpuTone  = tone(node.cpu,   thr.cpuWarn,       thr.cpuHot);
         const memTone  = tone(node.memPct, 75,               90);
         const swapTone = tone(node.swapPct, 20,              50);
-        const tempTone = tone(node.temp,  thr.tempWarn,      thr.tempCrit);
+        // Hardware-published CPU limits take precedence over the UI settings.
+        // The BMC reports the board vendor's own thresholds for each sensor
+        // (97/100 on this board), whereas alerts.tempWarn/tempCrit are a
+        // generic default someone typed into the settings page. Fall back to
+        // the settings only when the hardware publishes nothing.
+        const thermByName = {};
+        for (const m of node.rawMetrics || []) {
+          if (m.module === "thermal" && typeof m.value === "number") thermByName[m.name] = m.value;
+        }
+        const tempWarn = thermByName.cpu_warn_c ?? thr.tempWarn;
+        const tempCrit = thermByName.cpu_crit_c ?? thr.tempCrit;
+        const tempTone = tone(node.temp,  tempWarn,          tempCrit);
         const powTone  = tone(node.power, thr.nodePowerWarn, thr.nodePowerHot);
         const fanRatio = node.fanTotal > 0 ? node.fanOk / node.fanTotal : 1;
         const fanTone  = fanRatio < 0.75 ? "crit" : fanRatio < 1 ? "warn" : "";
@@ -1733,7 +1896,7 @@
                 <div className="nd-kpi-label">CPU Temp</div>
                 <div className="nd-kpi-val">{Math.round(node.temp)}<span className="u">°C</span></div>
                 <div className="nd-kpi-bar"><div className="nd-kpi-bar-fill" style={{ width: `${Math.min(100, node.temp)}%`, background: colorFor(tempTone) }} /></div>
-                <div className="nd-kpi-sub">Warn {thr.tempWarn}° · Crit {thr.tempCrit}°</div>
+                <div className="nd-kpi-sub">Warn {tempWarn}° · Crit {tempCrit}°</div>
               </div>
               <div className={`nd-kpi ${fanTone}`}>
                 <div className="nd-kpi-label">Fans</div>
@@ -1777,7 +1940,8 @@
                       <span className={`nd-bar-value ${cpuTone}`}>{Math.round(node.cpu)}<span className="u">%</span></span>
                     </div>
                     <div className="nd-bar-track"><div className="nd-bar-fill" style={{ width:`${node.cpu}%`, background: colorFor(cpuTone) }} /></div>
-                    <MiniChart values={node.cpuHistory} color={colorFor(cpuTone)} height={52} />
+                    <MiniChart values={node.cpuHistory} color={colorFor(cpuTone)} height={52} yMin={0} yMax={100}
+                      times={node.historyTimes} unit="%" digits={1} />
                   </div>
                   <div className="nd-bar-item">
                     <div className="nd-bar-header">
@@ -1785,7 +1949,8 @@
                       <span className={`nd-bar-value ${memTone}`}>{node.memG.toFixed(1)}<span className="u">G</span></span>
                     </div>
                     <div className="nd-bar-track"><div className="nd-bar-fill" style={{ width:`${Math.min(100, node.memPct)}%`, background:"var(--mem)" }} /></div>
-                    <MiniChart values={node.memHistory} color="var(--mem)" height={52} />
+                    <MiniChart values={node.memHistory} color="var(--mem)" height={52} yMin={0} yMax={100}
+                      times={node.historyTimes} unit="%" digits={1} />
                   </div>
                   <div className="nd-bar-item">
                     <div className="nd-bar-header">
@@ -1793,7 +1958,8 @@
                       <span className={`nd-bar-value ${swapTone}`}>{node.swapG.toFixed(1)}<span className="u">G</span></span>
                     </div>
                     <div className="nd-bar-track"><div className="nd-bar-fill" style={{ width:`${Math.min(100, node.swapPct)}%`, background:"var(--swap)" }} /></div>
-                    <MiniChart values={node.swapHistory} color="var(--swap)" height={52} />
+                    <MiniChart values={node.swapHistory} color="var(--swap)" height={52} yMin={0} yMax={100}
+                      times={node.historyTimes} unit="%" digits={1} />
                   </div>
                   <div className="nd-bar-item">
                     <div className="nd-bar-header">
@@ -1801,7 +1967,8 @@
                       <span className={`nd-bar-value ${tempTone}`}>{Math.round(node.temp)}<span className="u">°C</span></span>
                     </div>
                     <div className="nd-bar-track"><div className="nd-bar-fill" style={{ width:`${Math.min(100,node.temp)}%`, background: colorFor(tempTone) }} /></div>
-                    <MiniChart values={node.tempHistory} color={colorFor(tempTone)} height={52} />
+                    <MiniChart values={node.tempHistory} color={colorFor(tempTone)} height={52}
+                      yMin={45} yMax={tempCrit + 5} times={node.historyTimes} unit="°C" />
                   </div>
                 </div>
               </div>
@@ -1817,7 +1984,13 @@
                     <div className="nd-bar-fill" style={{ width:`${Math.min(100,(node.power/thr.nodePowerHot)*100)}%`, background: colorFor(powTone) }} />
                   </div>
                 </div>
-                <MiniChart values={node.powerHistory.map(v => v * 10)} color={colorFor(powTone)} height={80} />
+                {/* Fixed 0..crit+100 W scale: the trace height is then directly
+                    comparable over time and reads against the threshold tiles
+                    below, rather than auto-fitting to whatever the last 60
+                    samples happened to span. */}
+                <MiniChart values={node.powerHistory.map(v => v * 10)} color={colorFor(powTone)}
+                  height={80} yMin={0} yMax={thr.nodePowerHot + 100}
+                  times={node.historyTimes} unit="W" />
                 <div style={{ marginTop: 12, display: "flex", gap: 12 }}>
                   {[["Warn threshold", `${thr.nodePowerWarn}W`], ["Crit threshold", `${thr.nodePowerHot}W`]].map(([k,v]) => (
                     <div key={k} style={{ flex: 1, padding: "6px 10px", borderRadius: 8, background: "var(--surface-2)", border: "1px solid var(--line)" }}>
@@ -1831,73 +2004,180 @@
               <div className="nd-card">
                 <h3>Thermal Sensors</h3>
                 {(() => {
-                  const therm = {};
-                  for (const m of node.rawMetrics || []) {
-                    if (m.module === "thermal" && typeof m.value === "number") therm[m.name] = m.value;
-                  }
-                  const toneFor = (val, warn, crit) => val >= crit ? "crit" : val >= warn ? "warn" : "";
-                  const sensors = [];
+                  const therm = thermByName;
 
-                  // Per-CPU-package readings.
-                  const pkgKeys = Object.keys(therm).filter(k => /^cpu_package\d+_c$/.test(k)).sort();
-                  const cpuWarn = therm.cpu_warn_c ?? thr.tempWarn;
-                  const cpuCrit = therm.cpu_crit_c ?? thr.tempCrit;
-                  for (const k of pkgKeys) {
-                    const idx = k.match(/^cpu_package(\d+)_c$/)[1];
-                    const val = therm[k];
-                    sensors.push({ label: `CPU${idx}`, val, tone: toneFor(val, cpuWarn, cpuCrit) });
-                  }
-                  if (typeof therm.cpu_package_max_c === "number" && pkgKeys.length > 1) {
-                    const val = therm.cpu_package_max_c;
-                    sensors.push({ label: "CPU Max", val, tone: toneFor(val, cpuWarn, cpuCrit) });
-                  }
+                  // One panel per thermal domain the worker reports, in a fixed
+                  // 2x4 order so the layout does not reflow as sensors come and
+                  // go. `key` is the metric-name prefix: the worker emits
+                  // <key>_max_c / <key>_count / <key>_warn_c / <key>_crit_c for
+                  // each. chipset is the exception -- it is a single sensor and
+                  // keeps the historical name chipset_c.
+                  // One cell per CPU package. The socket count is whatever the
+                  // worker reports -- it emits cpu_package<N>_c per socket --
+                  // so a 1-, 2-, 4- or 8-socket machine all render correctly.
+                  // Sorted numerically, not lexically, so socket 10 does not
+                  // land between 1 and 2 on a large system.
+                  // One cell per <stem><N>_c the worker reports, each scored
+                  // against its own limits rather than the domain's. Cells show
+                  // only the reading; the sensor's identity and what it measures
+                  // live in the hover card, because the worker sends numeric
+                  // metrics only and cannot ship the BMC's sensor names.
+                  //
+                  // `width` picks the cell size: "wide" for domains with a
+                  // couple of sensors that read better side by side (CPU
+                  // sockets, NVMe groups), "full" for a lone sensor that should
+                  // own the whole panel, "tri"/"penta" for three or five
+                  // across, and the default 4-across grid for anything denser.
+                  // Indices are discovered from the data and sorted
+                  // numerically, so no sensor count is baked in anywhere.
+                  const renderZones = (stem, nameFor, descFor, width) => ({ therm, warn, crit }) => {
+                    const wide = width === "wide" || width === "full";
+                    const gridCls = width === "full" ? "nd-full-grid"
+                                  : width === "tri" ? "nd-tri-grid"
+                                  : width === "penta" ? "nd-penta-grid"
+                                  : wide ? "nd-cpu-grid" : "nd-zone-grid";
+                    const cellCls = wide ? "nd-cpu-cell" : "nd-zone-cell";
+                    const valCls  = wide ? "nd-cpu-val"  : "nd-zone-val";
+                    const cell = (key, v, w, c, name, desc, edge) => {
+                      const t = (typeof c === "number" && v >= c) ? "crit"
+                              : (typeof w === "number" && v >= w) ? "warn"
+                              : "";
+                      return (
+                        <div key={key} className={`${cellCls} nd-tip ${edge || ""} ${t}`}>
+                          <span className={valCls}>{Math.round(v)}<span className="u">°C</span></span>
+                          <span className="nd-tip-pop">
+                            <span className="nd-tip-name">{name}</span>
+                            <span className="nd-tip-desc">{desc}</span>
+                          </span>
+                        </div>
+                      );
+                    };
 
-                  if (typeof therm.nvme_max_c === "number") {
-                    const val = therm.nvme_max_c;
-                    const count = therm.nvme_count;
-                    const warn = therm.nvme_warn_c ?? 70;
-                    const crit = therm.nvme_crit_c ?? 80;
-                    sensors.push({ label: count ? `NVMe Max (${count|0})` : "NVMe Max", val, tone: toneFor(val, warn, crit) });
-                  }
-                  if (typeof therm.nic_max_c === "number") {
-                    const val = therm.nic_max_c;
-                    const count = therm.nic_count;
-                    const warn = therm.nic_warn_c ?? 85;
-                    const crit = therm.nic_crit_c ?? 95;
-                    sensors.push({ label: count ? `NIC Max (${count|0})` : "NIC Max", val, tone: toneFor(val, warn, crit) });
-                  }
-                  if (typeof therm.chipset_c === "number") {
-                    const val = therm.chipset_c;
-                    const warn = therm.chipset_warn_c ?? 75;
-                    const crit = therm.chipset_crit_c ?? 85;
-                    sensors.push({ label: "Chipset", val, tone: toneFor(val, warn, crit) });
-                  }
+                    const re = new RegExp(`^${stem}(\\d+)_c$`);
+                    const idxs = Object.keys(therm)
+                      .map(k => { const m = k.match(re); return m ? parseInt(m[1], 10) : null; })
+                      .filter(i => i !== null)
+                      .sort((a, b) => a - b);
 
-                  // Fallback: any thermal.*_c reading we didn't already cover.
-                  const covered = new Set([...pkgKeys, "cpu_package_max_c", "nvme_max_c", "nic_max_c", "chipset_c",
-                                           "cpu_warn_c","cpu_crit_c","nvme_warn_c","nvme_crit_c","nic_warn_c","nic_crit_c","chipset_warn_c","chipset_crit_c"]);
-                  for (const [k, v] of Object.entries(therm)) {
-                    if (covered.has(k)) continue;
-                    if (!k.endsWith("_c")) continue;
-                    const label = k.replace(/_c$/, "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
-                    sensors.push({ label, val: v, tone: toneFor(v, thr.tempWarn, thr.tempCrit) });
-                  }
+                    if (idxs.length === 0) {
+                      // A worker predating per-sensor metrics publishes only the
+                      // domain maximum. Render that as a single cell so the panel
+                      // still carries its reading instead of looking broken.
+                      const mv = therm[`${stem}_max_c`];
+                      if (typeof mv !== "number") return "no readings";
+                      return (
+                        <div className={gridCls}>
+                          {cell("max", mv, warn, crit, "Domain maximum",
+                                "Hottest sensor only \u2014 this worker does not report per-sensor values.")}
+                        </div>
+                      );
+                    }
 
-                  if (sensors.length === 0) {
-                    return <div style={{ fontSize: 12, color: "var(--muted)" }}>No thermal sensors reported.</div>;
-                  }
+                    // Columns per row, so the first and last of each row can
+                    // anchor their popover inward instead of overhanging.
+                    const cols = width === "tri" ? 3
+                               : width === "penta" ? 5
+                               : (width === "full" || wide) ? idxs.length
+                               : 4;
+                    const edgeOf = n => cols < 2 ? ""
+                                      : n % cols === 0 ? "tip-start"
+                                      : n % cols === cols - 1 ? "tip-end"
+                                      : "";
+                    return (
+                      <div className={gridCls}>
+                        {idxs.map((i, n) => cell(i, therm[`${stem}${i}_c`],
+                          // A sensor only publishes its own limits when they
+                          // differ from the domain pair, so fall back to the
+                          // domain's rather than treating absence as unknown.
+                          therm[`${stem}${i}_warn_c`] ?? warn,
+                          therm[`${stem}${i}_crit_c`] ?? crit,
+                          nameFor(i), descFor(i), edgeOf(n)))}
+                      </div>
+                    );
+                  };
+
+                  const DOMAINS = [
+                    { key: "cpu",     label: "CPU",     valueKey: "cpu_package_max_c",
+                      render: renderZones("cpu_package",
+                        i => `CPU${i}`,
+                        i => `Processor package temperature, socket ${i}.`, "wide") },
+                    { key: "dimm",    label: "DIMM",    render: renderZones("dimm",
+                        i => `DIMM group ${i}`,
+                        i => `Memory zone ${i} — one bank of DIMM slots, not a single module.`) },
+                    { key: "nvme",    label: "NVMe",    render: renderZones("nvme",
+                        i => `NVMe group ${i}`,
+                        i => `Drive-bay group ${i} \u2014 a backplane sensor covering several NVMe drives.`, "wide") },
+                    { key: "nic",     label: "NIC",     render: renderZones("nic",
+                        () => "Network controller",
+                        () => "Onboard NIC, read in-band from the kernel \u2014 the BMC exposes no network sensor.", "full") },
+                    { key: "psu",     label: "PSU",     render: renderZones("psu",
+                        i => `PSU ${i + 1}`,
+                        i => `Power supply ${i + 1} internal hotspot \u2014 rises with the current it delivers.`) },
+                    // 6 regulators as 2 sockets x 3 rails. The BMC lists them
+                    // P0 SOC/CORE/VDDIO then P1 SOC/CORE/VDDIO, so a 3-column
+                    // grid in index order puts a socket on each row and a rail
+                    // in each column. NOTE: that mapping is inferred from this
+                    // board's SDR ordering -- the worker sends numeric indices
+                    // only, so a board enumerating its rails differently would
+                    // be mislabelled here.
+                    { key: "vr",      label: "VR",      render: renderZones("vr",
+                        i => `P${Math.floor(i / 3)} ${["SOC", "CORE", "VDDIO"][i % 3]}`,
+                        i => [
+                          "SoC / IOD rail \u2014 Infinity Fabric, memory controllers, PCIe root complexes.",
+                          "Main Vcore regulator \u2014 highest current on the board; climbs fastest under load.",
+                          "Memory I/O rail regulator.",
+                        ][i % 3], "tri") },
+                    // Five sensors measuring three different kinds of thing:
+                    // two ambient-air probes, the drive backplane (the machine's
+                    // best proxy for intake air, and the only sensor limited to
+                    // 55/60), and two host-interface-card controllers that idle
+                    // near 65 C against a 105/110 ceiling. Same caveat as VR:
+                    // the names come from this board's SDR ordering, since the
+                    // worker publishes numeric indices only.
+                    { key: "board",   label: "Board",   render: renderZones("board",
+                        i => ["M.2 air 1", "M.2 air 2", "Backplane", "HIC 0", "HIC 1"][i] ?? `Board ${i}`,
+                        i => [
+                          "Ambient air at the M.2 slots \u2014 internal air, not a component.",
+                          "Ambient air, second M.2 area.",
+                          "Drive backplane board \u2014 the closest thing to an intake air reading.",
+                          "Host interface card controller on the PCIe / GPU interconnect path.",
+                          "Second host interface card controller.",
+                        ][i] ?? "Chassis or board sensor.", "penta") },
+                    { key: "chipset", label: "Chipset", valueKey: "chipset_c" },
+                  ];
 
                   return (
-                    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(120px, 1fr))", gap:8 }}>
-                      {sensors.map(s => (
-                        <div key={s.label} className={`nd-kpi ${s.tone}`} style={{ padding:"10px 12px" }}>
-                          <div className="nd-kpi-label">{s.label}</div>
-                          <div className="nd-kpi-val" style={{ fontSize:18 }}>
-                            {typeof s.val === "number" ? s.val.toFixed(1) : "—"}
-                            <span className="u">°C</span>
+                    <div className="nd-therm-grid">
+                      {DOMAINS.map(d => {
+                        const val = therm[d.valueKey ?? `${d.key}_max_c`];
+                        const count = therm[`${d.key}_count`];
+                        const warn = therm[`${d.key}_warn_c`];
+                        const crit = therm[`${d.key}_crit_c`];
+                        const present = typeof val === "number";
+                        const tone = !present ? ""
+                          : (typeof crit === "number" && val >= crit) ? "crit"
+                          : (typeof warn === "number" && val >= warn) ? "warn"
+                          : "";
+                        return (
+                          <div key={d.key} className={`nd-therm-panel ${present ? tone : "absent"}`}>
+                            <div className="nd-therm-head">
+                              <span className="nd-therm-name">{d.label}</span>
+                              <span className="nd-therm-meta">
+                                {present
+                                  ? `${typeof count === "number" ? `${count | 0} sensor${(count | 0) === 1 ? "" : "s"} \u00b7 ` : ""}${typeof warn === "number" ? `warn ${warn}` : ""}${typeof crit === "number" ? ` / crit ${crit}` : ""}`
+                                  : "no sensor"}
+                              </span>
+                            </div>
+                            <div className={`nd-therm-slot ${present && d.render ? "filled" : ""}`}>
+                              {!present
+                                ? "not present on this board"
+                                : d.render
+                                  ? d.render({ therm, warn, crit })
+                                  : "visualization pending"}
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   );
                 })()}

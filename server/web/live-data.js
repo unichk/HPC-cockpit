@@ -232,10 +232,13 @@ function flushHistoryStore() {
 function pushHistory(id, key, value) {
   let entry = historyStore.get(id);
   if (!entry) {
-    entry = { cpu: [], mem: [], swap: [], temp: [], power: [] };
+    entry = { cpu: [], mem: [], swap: [], temp: [], power: [], t: [] };
     historyStore.set(id, entry);
   }
-  const arr = entry[key];
+  // Created on demand: "t" is newer than the other series, so entries restored
+  // from a previous session's sessionStorage will not have it yet.
+  let arr = entry[key];
+  if (!Array.isArray(arr)) arr = entry[key] = [];
   arr.push(value);
   if (arr.length > HISTORY_LEN) arr.splice(0, arr.length - HISTORY_LEN);
   flushHistoryStore();
@@ -245,6 +248,16 @@ function pushHistory(id, key, value) {
 function seedHistory(base, n = HISTORY_LEN) {
   const arr = [];
   for (let i = 0; i < n; i++) arr.push(base);
+  return arr;
+}
+
+// Timestamps for a seeded series: the synthetic samples are backdated one poll
+// interval apart so the hover readout on a just-discovered node shows a
+// sensible time axis instead of 60 identical stamps.
+function seedTimes(n = HISTORY_LEN) {
+  const now = Date.now();
+  const arr = [];
+  for (let i = 0; i < n; i++) arr.push(now - (n - 1 - i) * POLL_MS);
   return arr;
 }
 
@@ -269,6 +282,23 @@ function pickNum(idx, ...keys) {
   return 0;
 }
 
+// Presentation order for the chassis fan banks. The BMC reports sensors in SDR
+// order, which interleaves them -- on the G494 chassis SYS_FAN6/7 are listed
+// after SYS_FAN12 and the two EXT fans sit in the middle of the wall -- so the
+// banks are unreadable as banks unless we regroup them.
+const FAN_BANK_ORDER = ["sys", "rear", "ext"];
+
+// Split "sys_fan12_rpm" into its bank ("sys") and index (12). Handles the
+// sanitised BMC names (sys_fan1, rear_fan1, ext_fan3, cpu_fan_0) and the
+// generic fan_N fallback.
+function fanBankAndIndex(name) {
+  const base = String(name).replace(/_rpm$/, "");
+  const m = base.match(/^(.*?)_?(\d+)$/);
+  const idx = m ? parseInt(m[2], 10) : 0;
+  const bank = (m ? m[1] : base).replace(/_?fan_?$/, "").replace(/_+$/, "");
+  return { bank, idx };
+}
+
 function perFanRpms(metrics) {
   const out = [];
   const skip = new Set(["min_rpm", "max_rpm", "avg_rpm"]);
@@ -281,9 +311,21 @@ function perFanRpms(metrics) {
       m.name.endsWith("_rpm") &&
       !skip.has(m.name)
     ) {
-      out.push({ name: m.name, rpm: m.value });
+      const { bank, idx } = fanBankAndIndex(m.name);
+      out.push({ name: m.name, rpm: m.value, bank, idx });
     }
   }
+  // Known banks first in FAN_BANK_ORDER, then any unrecognised bank
+  // alphabetically, and numerically within each bank.
+  const rank = b => {
+    const i = FAN_BANK_ORDER.indexOf(b);
+    return i === -1 ? FAN_BANK_ORDER.length : i;
+  };
+  out.sort((a, b) =>
+    rank(a.bank) - rank(b.bank) ||
+    (a.bank < b.bank ? -1 : a.bank > b.bank ? 1 : 0) ||
+    a.idx - b.idx
+  );
   return out;
 }
 
@@ -378,6 +420,7 @@ function mapNode(raw, nowMs) {
       swap: seedHistory(swapPct),
       temp: seedHistory(temp),
       power: seedHistory(power / 10),
+      t: seedTimes(),
     });
   }
   const cpuHistory = pushHistory(id, "cpu", cpu);
@@ -385,6 +428,8 @@ function mapNode(raw, nowMs) {
   const swapHistory = pushHistory(id, "swap", swapPct);
   const tempHistory = pushHistory(id, "temp", temp);
   const powerHistory = pushHistory(id, "power", power / 10);
+  // One shared time axis: every series above is pushed on the same tick.
+  const historyTimes = pushHistory(id, "t", Date.now());
 
   return {
     id,
@@ -406,6 +451,7 @@ function mapNode(raw, nowMs) {
     fanRpm,
     fanVendor: fanVendorName(fanVendorCode),
     bmcHost,
+    historyTimes,
     perFan: perFanRpms(raw.metrics),
     gpuCount,
     gpuVendor,
