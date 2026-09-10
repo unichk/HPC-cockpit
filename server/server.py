@@ -735,6 +735,27 @@ DISCORD_WEBHOOK_URL = (
 
 STATUS_RANK = {"ok": 0, "warn": 1, "crit": 2}
 STATUS_COLOR = {"ok": 0x3BA55D, "warn": 0xE8A33D, "crit": 0xE0524A}
+STATUS_EMOJI = {"ok": "\U0001F7E2", "warn": "\U0001F7E1", "crit": "\U0001F534"}
+STATUS_WORD = {"ok": "recovered", "warn": "warning", "crit": "critical"}
+# Leading emoji per reason, matched on the text the evaluator produces, so a
+# glance at the message says which subsystem moved without reading the words.
+REASON_EMOJI = (
+    ("no data", "\U0001F4E1"),      # satellite
+    ("CPU temp", "\U0001F321\uFE0F"),  # thermometer
+    ("GPU temp", "\U0001F321\uFE0F"),
+    ("CPU ", "\U0001F9E0"),         # brain
+    ("power", "\u26A1"),            # high voltage
+    ("fans", "\U0001F300"),         # cyclone
+    ("memory", "\U0001F4BE"),       # floppy
+    ("swap", "\U0001F4BE"),
+)
+
+
+def reason_emoji(text: str) -> str:
+    for prefix, emoji in REASON_EMOJI:
+        if text.startswith(prefix):
+            return emoji
+    return "\u2022"
 
 
 class AlertNotifier:
@@ -842,14 +863,14 @@ class AlertNotifier:
                 return idx[key]
         return 0.0
 
-    def _power_breakdown(self, idx: dict) -> str:
-        """Component power as one compact line, appended to a power alert so
+    def _power_breakdown(self, idx: dict) -> list:
+        """Component power, one entry per line, appended to a power alert so
         the message says what is actually drawing the watts rather than just
         that the total crossed a line. Mirrors the detail page's breakdown:
         the measured parts, then the rest as "Others"."""
         total = self._pick(idx, "power.watts", "power.max_watts")
         if total <= 0:
-            return ""
+            return []
         parts = []
         for index in range(int(self._pick(idx, "cpu.socket_count"))):
             watts = self._pick(idx, f"cpu.socket{index}_power_w")
@@ -863,13 +884,12 @@ class AlertNotifier:
         if dimm_watts > 0:
             parts.append((f"DIMMs ({int(self._pick(idx, 'memory.dimm_count'))})", dimm_watts))
         if not parts:
-            return ""
+            return []
         others = total - sum(watts for _, watts in parts)
         if others > 0:
             parts.append(("Others", others))
-        return "breakdown: " + " · ".join(
-            f"{name} {watts:.0f}W ({watts / total * 100:.0f}%)" for name, watts in parts
-        )
+        return [f"breakdown: {name} {watts:.0f}W ({watts / total * 100:.0f}%)"
+                for name, watts in parts]
 
     def _evaluate(self, row: dict, settings: dict) -> tuple:
         idx = self._index(row)
@@ -946,8 +966,7 @@ class AlertNotifier:
         def with_breakdown(reasons: list) -> list:
             if not any(r.startswith("power ") for r in reasons):
                 return reasons
-            line = self._power_breakdown(idx)
-            return reasons + [line] if line else reasons
+            return reasons + self._power_breakdown(idx)
 
         if crit:
             return "crit", with_breakdown(crit)
@@ -962,33 +981,43 @@ class AlertNotifier:
                 worst = status
 
         fields = []
-        # Discord caps an embed at 25 fields.
+        # Discord caps an embed at 25 fields and a field value at 1024 chars.
         for node_id, prev, status, reasons in events[:25]:
-            arrow = "recovered" if status == "ok" else f"{prev} -> {status}"
-            detail = "\n".join(f"- {r}" for r in reasons) if reasons else "all metrics back within limits"
+            lines = []
+            for reason in reasons:
+                if reason.startswith("breakdown: "):
+                    # Rendered as its own italic line rather than a bullet: it
+                    # explains the reading above it instead of being a separate
+                    # thing that went wrong.
+                    lines.append(f"\u2003\u21B3 *{reason[len('breakdown: '):]}*")
+                else:
+                    lines.append(f"{reason_emoji(reason)}\u2002{reason}")
+            if not lines:
+                lines.append("\u2705\u2002all metrics back within limits")
+            transition = (f"`{prev} \u2192 {status}`" if status != "ok"
+                          else f"`{prev} \u2192 ok`")
             fields.append({
-                "name": f"{node_id} ({arrow})",
-                "value": detail[:1024],
+                "name": f"{node_id} {STATUS_EMOJI.get(status, '')}",
+                "value": (transition + "\n" + "\n".join(lines))[:1024],
                 "inline": False,
             })
         if len(events) > 25:
-            fields.append({"name": "...", "value": f"and {len(events) - 25} more", "inline": False})
+            fields.append({
+                "name": "\u2026",
+                "value": f"and {len(events) - 25} more node(s)",
+                "inline": False,
+            })
 
-        crit_n = sum(1 for e in events if e[2] == "crit")
-        warn_n = sum(1 for e in events if e[2] == "warn")
-        ok_n = sum(1 for e in events if e[2] == "ok")
-        parts = []
-        if crit_n:
-            parts.append(f"{crit_n} critical")
-        if warn_n:
-            parts.append(f"{warn_n} warning")
-        if ok_n:
-            parts.append(f"{ok_n} recovered")
+        counts = {level: sum(1 for e in events if e[2] == level) for level in ("crit", "warn", "ok")}
+        summary = " \u00b7 ".join(
+            f"{STATUS_EMOJI[level]} {counts[level]} {STATUS_WORD[level]}"
+            for level in ("crit", "warn", "ok") if counts[level]
+        )
 
         payload = {
             "username": "HPC Cockpit",
             "embeds": [{
-                "title": ", ".join(parts) or "node status change",
+                "title": summary or "node status change",
                 "color": STATUS_COLOR.get(worst, STATUS_COLOR["warn"]),
                 "fields": fields,
                 "footer": {"text": "hpc-cockpit"},
