@@ -1110,103 +1110,9 @@
         );
       }
 
-      // Single-quote-escape a value for inclusion inside a Bash single-quoted
-      // string. Required because BMC credentials get embedded in the shell
-      // command sent to the worker exec channel.
-      function shEsc(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
-
-      // AMI MegaRAC vendor JSON API session helper. This BMC's Redfish
-      // accepts PATCH on Oem.Public.FanControlMode and Fans[].Oem.Public.
-      // SpeedRatio with HTTP 204, but only the *mode* flip actually wires
-      // through to the fan controller — Fans[].SpeedRatio writes are
-      // silently no-op'd (a known AMI MegaRAC SP-X firmware bug on ODM
-      // builds). To control duty we use the BMC's web-UI API at
-      // /api/settings/fan/N, which requires session-based auth (POST
-      // /api/session → CSRFToken in JSON body + QSESSIONID cookie).
-      //
-      // Probed live on EPYC 9755 + AST BMC + AMI MegaRAC SP-X 13.x:
-      //   PUT /api/settings/fans-mode  body: {"control_mode":"manual"|"auto"}  HTTP 200
-      //   PUT /api/settings/fan/N      body: {"duty":<0..100>}                 HTTP 200
-      // Each /fan/N URL (N=1..6) covers a front+rear sensor pair; 6 slots
-      // total on this chassis. We don't log out — sessions time out on
-      // their own and an explicit DELETE adds no value here.
-      function amiPrelude(bmcHost, bmcUser, bmcPass) {
-        return [
-          `set -e`,
-          `U=${shEsc(bmcUser)}`,
-          `P=${shEsc(bmcPass)}`,
-          `HOST=${shEsc(`https://${bmcHost}`)}`,
-          `COOKIES=$(mktemp)`,
-          `trap 'rm -f "$COOKIES"' EXIT`,
-          // POST /api/session: form-encoded body, save cookies, capture the
-          // CSRFToken returned in the JSON body.
-          `LOGIN=$(curl --max-time 6 -sk -c "$COOKIES" -X POST \\`,
-          `  -d "username=$U&password=$P" \\`,
-          `  -w '\\n___HTTP %{http_code}___' "$HOST/api/session")`,
-          `echo "$LOGIN" | grep -q '___HTTP 200___' || { echo "BMC login failed (POST /api/session)" >&2; echo "$LOGIN" | head -3 >&2; exit 1; }`,
-          // Some firmware revisions return the JSON with whitespace after
-          // the colon ('"CSRFToken": "..."') and others omit it. Allow
-          // optional spaces/tabs between the colon and the opening quote.
-          `CSRF=$(echo "$LOGIN" | sed -n 's/.*"CSRFToken"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1)`,
-          `[ -n "$CSRF" ] || { echo "BMC login response missing CSRFToken" >&2; echo "$LOGIN" | head -3 >&2; exit 1; }`,
-          // Helper for state-changing PUTs: args $1=path $2=body.
-          `ami_put() {`,
-          `  local path="$1" body="$2"`,
-          `  local rc=$(curl --max-time 6 -sk -b "$COOKIES" \\`,
-          `    -H "X-CSRFTOKEN: $CSRF" -H 'Content-Type: application/json' \\`,
-          `    -X PUT -d "$body" \\`,
-          `    -o /dev/null -w '%{http_code}' \\`,
-          `    "$HOST$path")`,
-          `  [ "$rc" = "200" ] || { echo "PUT $path -> HTTP $rc" >&2; return 1; }`,
-          `}`,
-        ].join("\n");
-      }
-
-      // Set fan mode via the vendor JSON API. We always send BOTH
-      // control_mode and cooling_mode because the BMC's web UI does
-      // (captured Content-Length: 49 = both fields), and setting only
-      // control_mode leaves cooling_mode pinned at "normal" so subsequent
-      // duty PUTs are silently dropped.
-      function buildAmiModeCmd({ bmcHost, bmcUser, bmcPass, mode }) {
-        const wire = mode === "manual" ? "manual" : "auto";
-        const coolingWire = mode === "manual" ? "manual" : "normal";
-        const body = JSON.stringify({control_mode: wire, cooling_mode: coolingWire});
-        return [
-          amiPrelude(bmcHost, bmcUser, bmcPass),
-          `ami_put /api/settings/fans-mode ${shEsc(body)}`,
-          `echo "fan mode set to ${wire}"`,
-        ].join("\n");
-      }
-
-      // Set duty across every fan sensor. /api/settings/fan/N is 1-indexed
-      // and addresses individual sensors (NOT front/rear pairs as the URL
-      // shape might suggest) — confirmed by users reporting "only first 6
-      // fans changed" when we iterated N=1..fanCount/2. Now we loop N=1..
-      // fanCount so all FAN[0..5]_F and FAN[0..5]_R get set.
-      //
-      // Always include cooling_mode=manual alongside control_mode=manual:
-      // the BMC web UI sends both, and setting control_mode alone leaves
-      // cooling_mode pinned at "normal" (BMC auto curve still active),
-      // which makes the BMC reject subsequent duty PUTs with HTTP 500
-      // "Error in setting fan duty" code 1454.
-      function buildAmiDutyCmd({ bmcHost, bmcUser, bmcPass, pct, fanCount }) {
-        const sensors = Math.max(1, fanCount || 12);
-        const lines = [
-          amiPrelude(bmcHost, bmcUser, bmcPass),
-          `ami_put /api/settings/fans-mode ${shEsc(JSON.stringify({control_mode:"manual", cooling_mode:"manual"}))}`,
-        ];
-        for (let i = 1; i <= sensors; i++) {
-          lines.push(`ami_put /api/settings/fan/${i} ${shEsc(JSON.stringify({duty: pct}))}`);
-        }
-        lines.push(`echo "set ${pct}% across ${sensors} fan sensor(s)"`);
-        return lines.join("\n");
-      }
-
-      // Per-vendor IPMI/Redfish fan commands. Each entry returns a shell
-      // command string for the exec channel. Vendors absent from this table
-      // trigger the "not supported" banner in FanModal; no command is sent.
-      // setMode/setDuty/restore receive (args, ctx) — supermicro/dell ignore
-      // ctx; redfish uses ctx.{bmcHost,bmcUser,bmcPass,fanCount}.
+      // Per-vendor raw-IPMI fan commands for platforms WITHOUT the Gigabyte/AMI
+      // fan-profile API. Gigabyte/AMI boards (worker vendor "redfish", or
+      // "unknown" with a BMC address) use FanProfileControls below instead.
       const FAN_CMDS = {
         supermicro: {
           setMode: (mode) => `ipmitool raw 0x30 0x45 0x01 ${mode === "manual" ? "0x01" : "0x00"}\necho ok`,
@@ -1231,53 +1137,71 @@
           },
           restore: () => `ipmitool raw 0x30 0x30 0x01 0x01\necho "restored auto"`,
         },
-        // "redfish" — the worker detects ODM whitebox boards by probing
-        // /redfish/v1/Chassis/1/Thermal, but the actual control plane is
-        // the AMI MegaRAC vendor JSON API (POST /api/session for auth,
-        // PUT /api/settings/fans-mode and /api/settings/fan/N). The
-        // Redfish endpoint's Fans[].SpeedRatio PATCH returns HTTP 204
-        // but is a silent no-op on this firmware. Validated end-to-end
-        // on EPYC 9755 + AST + AMI MegaRAC SP-X 13.x.
-        redfish: {
-          setMode: (mode, ctx) => buildAmiModeCmd({
-            bmcHost: ctx.bmcHost, bmcUser: ctx.bmcUser, bmcPass: ctx.bmcPass,
-            mode: mode === "manual" ? "manual" : "auto",
-          }),
-          setDuty: (pct, ctx) => buildAmiDutyCmd({
-            bmcHost: ctx.bmcHost, bmcUser: ctx.bmcUser, bmcPass: ctx.bmcPass,
-            pct, fanCount: ctx.fanCount,
-          }),
-          restore: (_, ctx) => buildAmiModeCmd({
-            bmcHost: ctx.bmcHost, bmcUser: ctx.bmcUser, bmcPass: ctx.bmcPass,
-            mode: "auto",
-          }),
-        },
       };
+
+      // Gigabyte / AMI MegaRAC fan control goes through the BMC's fan-PROFILE
+      // API (see fanprofile_exec.py). Manual duty is a temporary profile named
+      // MANUAL built from a base profile; restoring means activating a real
+      // profile, which also deletes MANUAL. Every write is verified by
+      // readback and every run logs out of the BMC.
+      //
+      // The old path here (PUT /api/settings/fans-mode + /fan/N) was removed:
+      // it looped fan indices past the real fan count under `set -e`, could
+      // exceed its own timeout, never logged out (exhausting the BMC session
+      // table), and bypassed every thermal policy.
+      const MANUAL_PROFILE = "MANUAL";
+      let fanScriptCache = null;
+      async function fanProfileCmd(args) {
+        if (!fanScriptCache) {
+          const r = await fetch("fanprofile_exec.py", { cache: "no-store" });
+          if (!r.ok) throw new Error(`cannot load fanprofile_exec.py (HTTP ${r.status})`);
+          fanScriptCache = await r.text();
+        }
+        // JSON.stringify twice yields a JSON string literal, which is also a
+        // valid Python string literal. The quoted heredoc stops the shell from
+        // expanding anything, and keeps the password off every command line.
+        return `python3 - <<'COCKPIT_FANPY'\n` +
+          `ARGS = __import__("json").loads(${JSON.stringify(JSON.stringify(args))})\n` +
+          `${fanScriptCache}\nCOCKPIT_FANPY\n`;
+      }
+      function parseFanResult(stdout) {
+        const line = String(stdout || "").trim().split("\n").reverse().find(l => l.startsWith("RESULT "));
+        if (!line) return null;
+        try { return JSON.parse(line.slice(7)); } catch { return null; }
+      }
 
       function FanModal({ nodeId, node, onClose }) {
         const [token, setToken] = useState(() => sessionStorage.getItem("cockpit_exec_token") || "");
         const [tokenDraft, setTokenDraft] = useState("");
         const [editingToken, setEditingToken] = useState(() => !sessionStorage.getItem("cockpit_exec_token"));
-        // BMC credentials — only needed for the redfish path. Stored in
-        // sessionStorage so the user types them once per browser tab.
         const [bmcUser, setBmcUser] = useState(() => sessionStorage.getItem("cockpit_bmc_user") || "");
         const [bmcPass, setBmcPass] = useState(() => sessionStorage.getItem("cockpit_bmc_pass") || "");
         const [bmcUserDraft, setBmcUserDraft] = useState("");
         const [bmcPassDraft, setBmcPassDraft] = useState("");
         const [editingBmc, setEditingBmc] = useState(() =>
           !(sessionStorage.getItem("cockpit_bmc_user") && sessionStorage.getItem("cockpit_bmc_pass")));
-        const [mode, setMode] = useState("auto");
-        const [customPct, setCustomPct] = useState("");
         const [busy, setBusy] = useState(false);
         const [result, setResult] = useState(null);
+        // legacy raw-IPMI path
+        const [mode, setMode] = useState("auto");
+        // profile path
+        const [profiles, setProfiles] = useState(null);
+        const [activeProfile, setActiveProfile] = useState(null);
+        const [pickProfile, setPickProfile] = useState("");
+        const [baseProfile, setBaseProfile] = useState("");
+        const [kind, setKind] = useState("floor");
+        const [customPct, setCustomPct] = useState("");
 
         const vendor = node.fanVendor || "unknown";
-        const cmds = FAN_CMDS[vendor];
-        const supported = !!cmds;
-        const needsBmcCreds = vendor === "redfish";
+        // Worker vendor detection runs at start-up and can miss a slow BMC,
+        // leaving identical Gigabyte nodes as "unknown". The profile API is
+        // harmless to try: login simply fails on other BMCs.
+        const profileApi = vendor === "redfish" || (vendor === "unknown" && !!node.bmcHost);
+        const legacy = FAN_CMDS[vendor];
+        const supported = profileApi || !!legacy;
+        const needsBmcCreds = profileApi;
         const haveBmcCreds = !!(bmcUser && bmcPass);
         const bmcReady = !needsBmcCreds || (haveBmcCreds && node.bmcHost);
-        const ctx = { bmcHost: node.bmcHost, bmcUser, bmcPass, fanCount: node.fanTotal };
 
         useEffect(() => {
           const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -1291,43 +1215,6 @@
           sessionStorage.setItem("cockpit_exec_token", t);
           setToken(t); setTokenDraft(""); setEditingToken(false);
         }
-
-        async function runExec(cmd) {
-          if (!token || busy) return;
-          setBusy(true); setResult(null);
-          try {
-            // 20 s is generous for the redfish/AMI vendor-JSON flow:
-            // login (1 s) + 1 mode PUT + up to 6 fan PUTs (each ~0.5 s) +
-            // overhead = ~5 s typical. setMode/restore are even faster.
-            const r = await fetch(`/api/node/${encodeURIComponent(nodeId)}/exec`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "X-Exec-Token": token },
-              body: JSON.stringify({ cmd, timeout_s: 20 }),
-            });
-            const raw = await r.text();
-            let body = null;
-            try { body = JSON.parse(raw); } catch {}
-            if (!r.ok) {
-              setResult({ tone: "bad", text: (body && body.error) || `HTTP ${r.status}` });
-            } else if (body && body.error) {
-              setResult({ tone: "bad", text: `error: ${body.error}${body.stderr ? ` — ${body.stderr.trim()}` : ""}` });
-            } else if (body && typeof body.exit === "number" && body.exit !== 0) {
-              // Show stderr if present; fall back to stdout because some
-              // legacy snippets (Supermicro/Dell ipmitool) print failure
-              // diagnostics to stdout. Without this fallback the user only
-              // sees "exit=1" with no indication of what went wrong.
-              const detail = ((body.stderr || "").trim() || (body.stdout || "").trim());
-              setResult({ tone: "bad", text: `exit=${body.exit}${detail ? ` — ${detail}` : ""}` });
-            } else {
-              setResult({ tone: "ok", text: (body && (body.stdout || "").trim()) || "done" });
-            }
-          } catch (err) {
-            setResult({ tone: "bad", text: String(err && err.message || err) });
-          } finally {
-            setBusy(false);
-          }
-        }
-
         function saveBmcCreds() {
           const u = bmcUserDraft.trim();
           const p = bmcPassDraft;  // don't trim password
@@ -1339,36 +1226,106 @@
           setEditingBmc(false);
         }
 
-        function applyMode() {
-          if (!supported || !bmcReady) return;
-          runExec(cmds.setMode(mode, ctx));
+        // Run a shell command on the node. Returns the parsed exec body, or
+        // null after setting an error result.
+        async function runExec(cmd, timeout_s) {
+          const r = await fetch(`/api/node/${encodeURIComponent(nodeId)}/exec`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Exec-Token": token },
+            body: JSON.stringify({ cmd, timeout_s }),
+          });
+          const raw = await r.text();
+          let body = null;
+          try { body = JSON.parse(raw); } catch {}
+          if (!r.ok) { setResult({ tone: "bad", text: (body && body.error) || `HTTP ${r.status}` }); return null; }
+          if (body && body.error) {
+            setResult({ tone: "bad", text: `error: ${body.error}${body.stderr ? ` — ${body.stderr.trim()}` : ""}` });
+            return null;
+          }
+          return body || {};
         }
 
-        function applyDuty() {
-          if (!supported || !bmcReady) return;
-          const pct = parseInt(customPct, 10);
-          if (!Number.isFinite(pct) || pct < 1 || pct > 100) return;
-          runExec(cmds.setDuty(pct, ctx));
+        function applyProfileState(res) {
+          if (!res || !res.profiles) return;
+          setProfiles(res.profiles);
+          setActiveProfile(res.mode);
+          const real = res.profiles.filter(p => p !== MANUAL_PROFILE);
+          const prefer = res.mode && res.mode !== MANUAL_PROFILE ? res.mode
+                       : (res.base || (real.includes("SCC26v1") ? "SCC26v1" : "default"));
+          setPickProfile(p => (p && real.includes(p)) ? p : prefer);
+          setBaseProfile(p => (p && real.includes(p)) ? p : prefer);
         }
 
-        function restoreAuto() {
-          if (!supported || !bmcReady) return;
-          runExec(cmds.restore(null, ctx));
+        async function runProfile(args, { quiet } = {}) {
+          if (!token || busy || !bmcReady) return;
+          setBusy(true);
+          if (!quiet) setResult(null);
+          try {
+            const cmd = await fanProfileCmd({ host: node.bmcHost, user: bmcUser, pass: bmcPass, ...args });
+            // login waits up to ~30 s for a free BMC session slot
+            const body = await runExec(cmd, 90);
+            if (!body) return;
+            const res = parseFanResult(body.stdout);
+            if (!res) {
+              const detail = ((body.stderr || "").trim() || (body.stdout || "").trim());
+              setResult({ tone: "bad", text: `no result from node${detail ? ` — ${detail}` : ""}` });
+              return;
+            }
+            applyProfileState(res);
+            if (!quiet || !res.ok) setResult({ tone: res.ok ? "ok" : "bad", text: res.msg });
+          } catch (err) {
+            setResult({ tone: "bad", text: String(err && err.message || err) });
+          } finally {
+            setBusy(false);
+          }
         }
 
-        const presets = [20, 40, 60, 80, 100];
+        // Load the profile list as soon as token + BMC credentials exist.
+        useEffect(() => {
+          if (profileApi && token && bmcReady && profiles === null) runProfile({ op: "status" }, { quiet: true });
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [profileApi, token, bmcReady]);
+
+        async function runLegacy(cmd) {
+          if (!token || busy) return;
+          setBusy(true); setResult(null);
+          try {
+            const body = await runExec(cmd, 20);
+            if (!body) return;
+            if (typeof body.exit === "number" && body.exit !== 0) {
+              const detail = ((body.stderr || "").trim() || (body.stdout || "").trim());
+              setResult({ tone: "bad", text: `exit=${body.exit}${detail ? ` — ${detail}` : ""}` });
+            } else {
+              setResult({ tone: "ok", text: (body.stdout || "").trim() || "done" });
+            }
+          } catch (err) {
+            setResult({ tone: "bad", text: String(err && err.message || err) });
+          } finally {
+            setBusy(false);
+          }
+        }
+
         const pctVal = parseInt(customPct, 10);
-        const pctValid = Number.isFinite(pctVal) && pctVal >= 1 && pctVal <= 100;
-        const vendorLabel = vendor === "unknown" ? "unknown" : vendor.charAt(0).toUpperCase() + vendor.slice(1);
+        const minPct = profileApi ? 0 : 1;
+        const pctValid = Number.isFinite(pctVal) && pctVal >= minPct && pctVal <= 100;
+        const presets = profileApi ? [0, 10, 20, 30, 40, 50, 60, 80, 100] : [20, 40, 60, 80, 100];
+        const vendorLabel = profileApi && vendor === "unknown" ? "Gigabyte/AMI (BMC probe)"
+                          : vendor === "unknown" ? "unknown" : vendor.charAt(0).toUpperCase() + vendor.slice(1);
+        const realProfiles = (profiles || []).filter(p => p !== MANUAL_PROFILE);
+        const canAct = supported && token && bmcReady && !busy;
 
         const inputStyle = { flex: 1, padding: "6px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface-2)", color: "var(--ink)", fontFamily: "var(--mono)", fontSize: 13 };
+        const sectionLbl = { fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 };
+        const notice = (tone) => ({ fontSize: 12, padding: "10px 12px", borderRadius: 6, lineHeight: 1.5, color: "var(--ink)",
+          background: `color-mix(in oklab, var(--${tone}) 12%, var(--surface-2))`,
+          border: `1px solid color-mix(in oklab, var(--${tone}) 40%, var(--line))` });
 
         return (
           <div className="nd-modal-bg" onClick={e => e.target === e.currentTarget && onClose()}>
             <div className="nd-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 620, height: "auto" }}>
               <div className="nd-modal-head">
                 <span className="nd-modal-title">Fan Control · {nodeId}</span>
-                <span className="nd-modal-warn">⚠ Overrides BMC · root</span>
+                <span className="nd-modal-warn">⚠ Changes BMC fan policy · root</span>
                 <button className="nd-modal-close" onClick={onClose} title="Close (Esc)">×</button>
               </div>
 
@@ -1378,23 +1335,20 @@
                     ? <>Fans <b style={{ color: "var(--ink)" }}>{node.fanOk}/{node.fanTotal} OK</b>
                         {node.fanRpm > 0 && <> · avg <b style={{ color: "var(--ink)" }}>{(node.fanRpm / 1000).toFixed(2)} kRPM</b></>}
                         {" "}· vendor <b style={{ color: "var(--ink)" }}>{vendorLabel}</b>
+                        {profileApi && activeProfile && <> · profile <b style={{ color: activeProfile === MANUAL_PROFILE ? "var(--warn)" : "var(--ink)" }}>{activeProfile}</b></>}
                       </>
                     : <em>fan data unavailable on this node</em>}
                 </div>
 
                 {!supported && (
-                  <div style={{ fontSize: 12, padding: "10px 12px", borderRadius: 6,
-                    background: "color-mix(in oklab, var(--warn) 12%, var(--surface-2))",
-                    color: "var(--ink)", border: "1px solid color-mix(in oklab, var(--warn) 40%, var(--line))", lineHeight: 1.5 }}>
+                  <div style={notice("warn")}>
                     <div style={{ fontWeight: 700, marginBottom: 4, color: "var(--warn)" }}>Fan tuning is not supported on this platform.</div>
-                    Detected vendor: <b>{vendorLabel}</b>. <code>FAN_CMDS</code> in <code>server/web/node.html</code> currently covers Supermicro, Dell, and Redfish (AMI MegaRAC-style). To enable tuning on other hardware, add the right <code>ipmitool raw …</code> opcodes there.
+                    Detected vendor: <b>{vendorLabel}</b>, and no BMC address was reported. Gigabyte/AMI boards use the BMC fan-profile API; <code>FAN_CMDS</code> in <code>server/web/node.html</code> covers Supermicro and Dell.
                   </div>
                 )}
 
-                {supported && vendor === "redfish" && !node.bmcHost && (
-                  <div style={{ fontSize: 12, padding: "10px 12px", borderRadius: 6,
-                    background: "color-mix(in oklab, var(--warn) 12%, var(--surface-2))",
-                    color: "var(--ink)", border: "1px solid color-mix(in oklab, var(--warn) 40%, var(--line))", lineHeight: 1.5 }}>
+                {profileApi && !node.bmcHost && (
+                  <div style={notice("warn")}>
                     <div style={{ fontWeight: 700, marginBottom: 4, color: "var(--warn)" }}>BMC IP not yet discovered.</div>
                     The worker hasn't reported a BMC management IP for this node. Check that <code>ipmitool lan print 1</code> returns a valid address as root, then restart <code>hpc-worker</code>.
                   </div>
@@ -1434,60 +1388,106 @@
                   </div>
                 ))}
 
-                <div>
-                  <div style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>Mode</div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <select value={mode} onChange={e => setMode(e.target.value)} disabled={!supported}
-                      style={{ ...inputStyle, fontSize: 12, opacity: supported ? 1 : 0.5 }}>
-                      <option value="auto">Auto (BMC-controlled)</option>
-                      <option value="manual">Manual (override)</option>
-                    </select>
-                    <button className="nd-freq-btn" onClick={applyMode} disabled={!supported || !token || !bmcReady || busy}>Set mode</button>
+                {profileApi && (
+                  <div>
+                    <div style={sectionLbl}>Fan profile</div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <select value={pickProfile} onChange={e => setPickProfile(e.target.value)} disabled={!profiles}
+                        style={{ ...inputStyle, fontSize: 12 }}>
+                        {!profiles && <option value="">{token && bmcReady ? (busy ? "loading…" : "—") : "enter token + BMC login"}</option>}
+                        {realProfiles.map(p => <option key={p} value={p}>{p}{p === activeProfile ? "  (active)" : ""}</option>)}
+                      </select>
+                      <button className="nd-freq-btn" disabled={!canAct || !pickProfile}
+                        onClick={() => runProfile({ op: "activate", name: pickProfile })}>Activate</button>
+                      <button className="nd-freq-btn" disabled={!canAct} title="Re-read the BMC"
+                        onClick={() => runProfile({ op: "status" })}>↻</button>
+                    </div>
                   </div>
-                </div>
+                )}
 
-                <div>
-                  <div style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>Duty %</div>
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-                    {presets.map(p => (
-                      <button key={p} className="nd-freq-preset" disabled={!supported}
-                        onClick={() => setCustomPct(String(p))}
-                        style={{ opacity: supported ? 1 : 0.5, cursor: supported ? "pointer" : "not-allowed" }}
-                        title={`${p}% PWM`}>
-                        {p}%
-                      </button>
-                    ))}
+                {legacy && !profileApi && (
+                  <div>
+                    <div style={sectionLbl}>Mode</div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <select value={mode} onChange={e => setMode(e.target.value)} style={{ ...inputStyle, fontSize: 12 }}>
+                        <option value="auto">Auto (BMC-controlled)</option>
+                        <option value="manual">Manual (override)</option>
+                      </select>
+                      <button className="nd-freq-btn" onClick={() => runLegacy(legacy.setMode(mode))} disabled={!canAct}>Set mode</button>
+                    </div>
                   </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <input type="number" value={customPct} onChange={e => setCustomPct(e.target.value)}
-                      disabled={!supported}
-                      placeholder="% (1–100)" min={1} max={100}
-                      style={{ ...inputStyle, opacity: supported ? 1 : 0.5 }} />
-                    <button className="nd-freq-btn" onClick={applyDuty} disabled={!supported || !token || !bmcReady || busy || !pctValid}>Apply</button>
+                )}
+
+                {supported && (
+                  <div>
+                    <div style={sectionLbl}>Manual duty %</div>
+                    {profileApi && (
+                      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8, fontSize: 12, flexWrap: "wrap" }}>
+                        {[["floor", "Floor — minimum X%, thermal ramps stay on"], ["pin", "Pin — exactly X%, no thermal ramp"]].map(([k, lbl]) => (
+                          <label key={k} style={{ display: "flex", gap: 4, alignItems: "center", cursor: "pointer",
+                            padding: "4px 8px", borderRadius: 6, border: "1px solid var(--line)",
+                            background: kind === k ? "var(--accent-soft)" : "var(--surface-2)" }}>
+                            <input type="radio" name="fankind" checked={kind === k} onChange={() => setKind(k)} />{lbl}
+                          </label>
+                        ))}
+                        <span style={{ color: "var(--muted)" }}>based on</span>
+                        <select value={baseProfile} onChange={e => setBaseProfile(e.target.value)} disabled={!profiles}
+                          style={{ ...inputStyle, flex: "0 0 auto", fontSize: 12, padding: "4px 6px" }}>
+                          {realProfiles.map(p => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                      </div>
+                    )}
+                    {profileApi && kind === "pin" && (
+                      <div style={{ ...notice("crit"), marginBottom: 8 }}>
+                        <b style={{ color: "var(--crit)" }}>Pin disables thermal protection.</b> Fans stay at exactly this duty however hot anything gets. Under GPU load, HIC reached 95 °C at 30% even at idle — use Pin only while watching temperatures, and Activate a real profile afterwards.
+                      </div>
+                    )}
+                    {profileApi && pctValid && pctVal < 30 && (
+                      <div style={{ ...notice("warn"), marginBottom: 8 }}>
+                        <b style={{ color: "var(--warn)" }}>Below 30%.</b> At idle HIC reached 95 °C with fans at 30%, so watch it.
+                        {pctVal < 10 && " Below ~10% the CPU fans drop under the BMC's 1,500 rpm warning level (≈9%) and 1,200 rpm critical level (≈6%), which logs fan-failure events and may make the BMC force full speed."}
+                        {kind === "floor" ? " Floor keeps the thermal ramps, so fans still rise as sensors warm." : " With Pin nothing will raise them — you will be asked to confirm."}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                      {presets.map(p => (
+                        <button key={p} className="nd-freq-preset" onClick={() => setCustomPct(String(p))} title={`${p}% PWM`}>{p}%</button>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <input type="number" value={customPct} onChange={e => setCustomPct(e.target.value)}
+                        placeholder={`% (${minPct}–100)`} min={minPct} max={100} style={inputStyle} />
+                      <button className="nd-freq-btn" disabled={!canAct || !pctValid || (profileApi && !baseProfile)}
+                        onClick={() => {
+                          if (!profileApi) return runLegacy(legacy.setDuty(pctVal));
+                          if (kind === "pin" && pctVal < 30 && !window.confirm(
+                              `Pin all fans at ${pctVal}% on ${nodeId} with NO thermal protection?\n\n` +
+                              `Nothing will speed the fans up if the node heats. Watch temperatures and ` +
+                              `activate a real profile afterwards.`)) return;
+                          runProfile({ op: "manual", pct: pctVal, kind, base: baseProfile });
+                        }}>Apply</button>
+                    </div>
                   </div>
-                </div>
+                )}
 
                 {result && (
                   <div style={{ fontFamily: "var(--mono)", fontSize: 12, padding: "6px 10px", borderRadius: 6,
                     background: result.tone === "bad" ? "color-mix(in oklab, var(--crit) 12%, var(--surface-2))"
-                              : result.tone === "warn" ? "color-mix(in oklab, var(--warn) 12%, var(--surface-2))"
                               : "color-mix(in oklab, var(--ok) 10%, var(--surface-2))",
-                    color: result.tone === "bad" ? "var(--crit)"
-                         : result.tone === "warn" ? "var(--warn)"
-                         : "var(--ink)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    color: result.tone === "bad" ? "var(--crit)" : "var(--ink)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                     {result.text}
                   </div>
                 )}
 
                 {supported && (
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--line)", paddingTop: 10 }}>
-                    <span onClick={(busy || !bmcReady) ? undefined : restoreAuto}
-                      style={{ fontSize: 11, color: (busy || !bmcReady) ? "var(--muted)" : "var(--accent)", cursor: (busy || !bmcReady) ? "default" : "pointer", textDecoration: "underline", textDecorationStyle: "dotted" }}>
-                      Restore (re-enable auto control)
+                    <span onClick={!canAct ? undefined : () => profileApi
+                          ? runProfile({ op: "activate", name: baseProfile || "default" })
+                          : runLegacy(legacy.restore())}
+                      style={{ fontSize: 11, color: !canAct ? "var(--muted)" : "var(--accent)", cursor: !canAct ? "default" : "pointer", textDecoration: "underline", textDecorationStyle: "dotted" }}>
+                      {profileApi ? `Restore (activate ${baseProfile || "default"}, remove MANUAL)` : "Restore (re-enable auto control)"}
                     </span>
-                    <span style={{ fontSize: 10, color: "var(--muted)" }}>
-                      {busy ? "running…" : ""}
-                    </span>
+                    <span style={{ fontSize: 10, color: "var(--muted)" }}>{busy ? "running…" : ""}</span>
                   </div>
                 )}
               </div>
@@ -1496,6 +1496,8 @@
         );
       }
 
+      // Map key → vendor name from gpu_collector.cpp's GpuVendor enum
+      // (exposed via live-data.js as node.gpus[i].vendor).
       // Map key → vendor name from gpu_collector.cpp's GpuVendor enum
       // (exposed via live-data.js as node.gpus[i].vendor).
       const GPU_CMDS = {
