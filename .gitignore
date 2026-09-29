@@ -1,6 +1,6 @@
 worker/build
 
-*/__pycache__
+__pycache__/
 
 server/schedule.json
 server/settings.json
