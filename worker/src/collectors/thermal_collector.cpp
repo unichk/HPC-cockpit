@@ -6,7 +6,9 @@
 #include <cstdio>
 #include <dirent.h>
 #include <fstream>
+#include <cstdio>
 #include <map>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -193,6 +195,53 @@ ThresholdMap LoadIpmiThresholds() {
   return out;
 }
 
+// DIMM temperature read from the CPU via AMD's E-SMI, used when the BMC does
+// not publish DIMM sensors of its own. ntu-scc01's BMC exposes DIMMG0-7;
+// ntu-scc02's exposes nothing, even though its DIMMs are present and E-SMI
+// reads them fine -- BMC sensor tables are baked in per platform, so this is
+// not something that can be enabled on the node.
+//
+// Address encoding matches memory_collector.cpp: base 0x20, one entry per
+// channel, with low nibbles 8..13 aliasing 0..5 (verified by reading the same
+// temperature at both halves).
+// NIC driver -> small integer code, mirroring FAN_VENDOR_NAMES style. The wire
+// format is numeric only, so the UI maps these back to a name and can say
+// which cells are the ConnectX cards and which is the onboard controller.
+// mlx5 covers ConnectX-4 through -7; the driver name cannot distinguish the
+// generation, so the UI labels it "ConnectX".
+int NicDriverCode(const std::string& driver) {
+  if (driver == "I350BB" || driver == "IGB") return 1;   // onboard Intel 1GbE
+  if (driver == "MLX5" || driver == "MLX5_CORE" || driver == "MLX4") return 2;  // ConnectX
+  if (driver == "IXGBE" || driver == "ICE") return 3;    // Intel 10/100GbE
+  if (driver == "BNXT" || driver == "BNXT_EN" || driver == "BNX2X") return 4;   // Broadcom
+  return 0;
+}
+
+constexpr int kDimmAddrBase = 0x20;
+constexpr int kDimmChannels[] = {0, 1, 2, 3, 4, 5};
+constexpr int kMaxDimmSockets = 8;
+
+bool ReadDimmTempC(int socket, int addr, double& celsius) {
+  char command[160];
+  std::snprintf(command, sizeof(command),
+                "timeout 3s e_smi_tool --showdimmthermal %d %d 2>/dev/null", socket, addr);
+  std::string payload;
+  if (!RunCommand(command, payload)) {
+    return false;
+  }
+  static const std::regex row(R"(Temperature\('C\)[^|]*\|\s*([0-9]+(?:\.[0-9]+)?))");
+  std::smatch match;
+  if (!std::regex_search(payload, match, row)) {
+    return false;
+  }
+  try {
+    celsius = std::stod(match[1].str());
+  } catch (...) {
+    return false;
+  }
+  return celsius > 0.0 && celsius <= 200.0;
+}
+
 class ThermalCollector : public Collector {
  public:
   std::string Name() const override { return "thermal"; }
@@ -217,7 +266,27 @@ class ThermalCollector : public Collector {
     // The BMC on this class of board exposes no NIC or chipset sensor, and its
     // NVMe rows are per-group aggregates. sysfs hwmon fills those gaps and
     // needs no lm-sensors package -- we read the kernel nodes directly.
-    CollectHwmon(cpu, nvme, nic, chipset);
+    CollectHwmon(cpu, nvme, nic, chipset, nic_drivers_);
+
+    // Per-channel readings from the CPU win over the BMC's DIMM *group*
+    // sensors. ntu-scc01's BMC reports 8 groups where E-SMI reports 12
+    // channels, and ntu-scc02's BMC reports none at all -- so preferring the
+    // BMC gave two nodes with identical memory different sensor counts. The
+    // BMC's limits are still the better ones (85/87 against a guessed 80/90),
+    // so they are carried over onto the E-SMI readings.
+    {
+      double bmc_warn = 0.0, bmc_crit = 0.0;
+      if (!dimm.readings.empty()) {
+        bmc_warn = dimm.readings.front().warn_c;
+        bmc_crit = dimm.readings.front().crit_c;
+      }
+      Domain esmi{"dimm", bmc_warn > 0.0 ? bmc_warn : dimm.default_warn_c,
+                  bmc_crit > 0.0 ? bmc_crit : dimm.default_crit_c, {}};
+      CollectEsmiDimm(esmi);
+      if (!esmi.readings.empty()) {
+        dimm.readings = std::move(esmi.readings);
+      }
+    }
 
     Domain* domains[] = {&cpu, &dimm, &nvme, &nic, &chipset, &psu, &vr, &board};
 
@@ -304,6 +373,10 @@ class ThermalCollector : public Collector {
         const Reading& reading = domain->readings[index];
         const std::string base = stem + std::to_string(index);
         out.push_back(Metric{"thermal", base + "_c", reading.celsius, "celsius"});
+        if (prefix == "nic" && index < nic_drivers_.size()) {
+          out.push_back(Metric{"thermal", base + "_driver_code",
+                               static_cast<double>(nic_drivers_[index]), "enum"});
+        }
         // Only publish a sensor's own limits when they differ from the
         // domain-level pair the consumer already has; otherwise it would be
         // the same two numbers repeated for every sensor. Homogeneous domains
@@ -321,6 +394,24 @@ class ThermalCollector : public Collector {
   }
 
  private:
+  // 12 shell-outs on a 2-socket box, ~120 ms, and only on boards whose BMC
+  // leaves the DIMM sensors out.
+  void CollectEsmiDimm(Domain& dimm) const {
+    for (int socket = 0; socket < kMaxDimmSockets; ++socket) {
+      bool any = false;
+      for (const int channel : kDimmChannels) {
+        double celsius = 0.0;
+        if (ReadDimmTempC(socket, kDimmAddrBase + channel, celsius)) {
+          dimm.readings.push_back(Reading{celsius, dimm.default_warn_c, dimm.default_crit_c});
+          any = true;
+        }
+      }
+      if (!any) {
+        break;  // socket does not exist; stop probing
+      }
+    }
+  }
+
   static const Reading& Hottest(const Domain& domain) {
     return *std::max_element(domain.readings.begin(), domain.readings.end(),
                              [](const Reading& a, const Reading& b) { return a.celsius < b.celsius; });
@@ -367,6 +458,13 @@ class ThermalCollector : public Collector {
       try {
         celsius = std::stod(reading);
       } catch (...) {
+        continue;
+      }
+      // Some boards report an unpopulated sensor as a numeric 0 rather than
+      // "No Reading" -- ntu-scc02 does this for two of its board sensors --
+      // which would otherwise render as a 0 C cell and drag the domain
+      // minimum down. Matches the bound the hwmon path already applies.
+      if (celsius <= 0.0 || celsius > 200.0) {
         continue;
       }
 
@@ -420,7 +518,9 @@ class ThermalCollector : public Collector {
   //
   // Drivers expose their own limits as tempN_max (warn) and tempN_crit, which
   // are used in preference to the domain defaults exactly as the BMC's are.
-  void CollectHwmon(Domain& cpu, Domain& nvme, Domain& nic, Domain& chipset) const {
+  void CollectHwmon(Domain& cpu, Domain& nvme, Domain& nic, Domain& chipset,
+                    std::vector<int>& nic_drivers) const {
+    nic_drivers.clear();
     DIR* dir = opendir("/sys/class/hwmon");
     if (dir == nullptr) {
       return;
@@ -482,6 +582,7 @@ class ThermalCollector : public Collector {
 
         if (is_nic) {
           nic.readings.push_back(reading);
+          nic_drivers.push_back(NicDriverCode(driver));
         } else if (is_chipset) {
           chipset.readings.push_back(reading);
         } else if (is_cpu) {
@@ -507,12 +608,18 @@ class ThermalCollector : public Collector {
     if (cpu.readings.empty()) {
       cpu.readings = std::move(hwmon_cpu);
     }
-    if (nvme.readings.empty()) {
+    // Per-drive readings win over the BMC's backplane group sensors: this
+    // chassis has 9 NVMe drives but only 2 IPMI group sensors, so preferring
+    // the BMC threw away seven drives' worth of detail. hwmon also carries
+    // each drive's own crit limit, which the group sensors cannot.
+    if (!hwmon_nvme.empty()) {
       nvme.readings = std::move(hwmon_nvme);
     }
   }
 
   bool last_available_ = true;
+  // Driver code per NIC reading, index-aligned with the nic domain.
+  mutable std::vector<int> nic_drivers_;
   // Populated once, at construction: static for the life of the machine.
   ThresholdMap ipmi_thresholds_ = LoadIpmiThresholds();
 };
