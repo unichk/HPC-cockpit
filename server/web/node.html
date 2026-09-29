@@ -1498,8 +1498,10 @@
 
       // Map key → vendor name from gpu_collector.cpp's GpuVendor enum
       // (exposed via live-data.js as node.gpus[i].vendor).
-      // Map key → vendor name from gpu_collector.cpp's GpuVendor enum
-      // (exposed via live-data.js as node.gpus[i].vendor).
+      // AMD keeps its rocm-smi templates. NVIDIA goes through gputune_exec.py,
+      // which validates every value against what the GPU reports and reads it
+      // back. (The old NVIDIA presets used H100-agnostic clocks such as
+      // -lgc 1500,2100, outside an H200's 345-1785 MHz range.)
       const GPU_CMDS = {
         amd: {
           setPowerCap: (i, w) => `rocm-smi -d ${i} --setpoweroverdrive ${w} --autorespond y\necho "cap=${w}W"`,
@@ -1512,33 +1514,44 @@
             `rocm-smi -d ${i} --resetpoweroverdrive --autorespond y && ` +
             `rocm-smi -d ${i} --setperflevel auto --autorespond y\necho "restored"`,
         },
-        nvidia: {
-          setPowerCap: (i, w) =>
-            `nvidia-smi -i ${i} -pm 1 >/dev/null && nvidia-smi -i ${i} -pl ${w}\necho "cap=${w}W"`,
-          setPerfLevel: (i, lvl) => {
-            const arg = { low: "-lgc 300,800", balanced: "-rgc", performance: "-lgc 1200,1800", max: "-lgc 1500,2100" }[lvl] || "-rgc";
-            return `nvidia-smi -i ${i} ${arg}\necho "perf=${lvl}"`;
-          },
-          restore: (i) =>
-            `nvidia-smi -i ${i} -rgc\necho "clocks reset to default (power cap untouched — re-apply via Apply if needed)"`,
-        },
       };
+
+      let gpuScriptCache = null;
+      async function gpuTuneCmd(args) {
+        if (!gpuScriptCache) {
+          const r = await fetch("gputune_exec.py", { cache: "no-store" });
+          if (!r.ok) throw new Error(`cannot load gputune_exec.py (HTTP ${r.status})`);
+          gpuScriptCache = await r.text();
+        }
+        return `python3 - <<'COCKPIT_GPUPY'\n` +
+          `ARGS = __import__("json").loads(${JSON.stringify(JSON.stringify(args))})\n` +
+          `${gpuScriptCache}\nCOCKPIT_GPUPY\n`;
+      }
 
       function GpuModal({ nodeId, node, onClose }) {
         const [token, setToken] = useState(() => sessionStorage.getItem("cockpit_exec_token") || "");
         const [tokenDraft, setTokenDraft] = useState("");
         const [editingToken, setEditingToken] = useState(() => !sessionStorage.getItem("cockpit_exec_token"));
         const [sel, setSel] = useState(0);
+        const [allGpus, setAllGpus] = useState(false);
         const [customW, setCustomW] = useState("");
         const [level, setLevel] = useState("balanced");
+        const [clkMin, setClkMin] = useState("");
+        const [clkMax, setClkMax] = useState("");
+        const [memMhz, setMemMhz] = useState("");
+        const [vbVal, setVbVal] = useState(null);
+        const [gstat, setGstat] = useState(null);     // per-GPU state from gputune_exec.py
         const [busy, setBusy] = useState(false);
         const [result, setResult] = useState(null);
 
         const gpus = Array.isArray(node.gpus) ? node.gpus : [];
         const selected = gpus[sel] || null;
         const vendor = selected ? selected.vendor : "unknown";
+        const isNv = vendor === "nvidia";
         const cmds = GPU_CMDS[vendor];
-        const supported = !!cmds;
+        const supported = isNv || !!cmds;
+        const targetIds = allGpus ? gpus.map(g => g.idx) : (selected ? [selected.idx] : []);
+        const tgt = (gstat || []).filter(g => targetIds.includes(g.idx));
 
         useEffect(() => {
           const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -1553,74 +1566,135 @@
           setToken(t); setTokenDraft(""); setEditingToken(false);
         }
 
+        async function execBody(cmd, timeout_s) {
+          const r = await fetch(`/api/node/${encodeURIComponent(nodeId)}/exec`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Exec-Token": token },
+            body: JSON.stringify({ cmd, timeout_s }),
+          });
+          const raw = await r.text();
+          let body = null;
+          try { body = JSON.parse(raw); } catch {}
+          if (!r.ok) { setResult({ tone: "bad", text: (body && body.error) || `HTTP ${r.status}` }); return null; }
+          if (body && body.error) { setResult({ tone: "bad", text: `error: ${body.error}${body.stderr ? ` — ${body.stderr.trim()}` : ""}` }); return null; }
+          return body || {};
+        }
+
+        // AMD / legacy path: plain command, exit code decides.
         async function runExec(cmd) {
           if (!token || busy) return;
           setBusy(true); setResult(null);
           try {
-            const r = await fetch(`/api/node/${encodeURIComponent(nodeId)}/exec`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "X-Exec-Token": token },
-              body: JSON.stringify({ cmd, timeout_s: 15 }),
-            });
-            const raw = await r.text();
-            let body = null;
-            try { body = JSON.parse(raw); } catch {}
-            if (!r.ok) {
-              setResult({ tone: "bad", text: (body && body.error) || `HTTP ${r.status}` });
-            } else if (body && body.error) {
-              setResult({ tone: "bad", text: `error: ${body.error}${body.stderr ? ` — ${body.stderr.trim()}` : ""}` });
-            } else if (body && typeof body.exit === "number" && body.exit !== 0) {
+            const body = await execBody(cmd, 15);
+            if (!body) return;
+            if (typeof body.exit === "number" && body.exit !== 0) {
               setResult({ tone: "bad", text: `exit=${body.exit}${body.stderr ? ` — ${body.stderr.trim()}` : ""}` });
             } else {
-              setResult({ tone: "ok", text: (body && (body.stdout || "").trim()) || "done" });
+              setResult({ tone: "ok", text: (body.stdout || "").trim() || "done" });
             }
           } catch (err) {
             setResult({ tone: "bad", text: String(err && err.message || err) });
           } finally { setBusy(false); }
         }
 
+        // NVIDIA path: gputune_exec.py, result parsed from its RESULT line.
+        async function runTune(args, { quiet } = {}) {
+          if (!token || busy) return;
+          setBusy(true);
+          if (!quiet) setResult(null);
+          try {
+            const body = await execBody(await gpuTuneCmd(args), 120);
+            if (!body) return;
+            const line = String(body.stdout || "").trim().split("\n").reverse().find(l => l.startsWith("RESULT "));
+            let res = null;
+            try { res = line ? JSON.parse(line.slice(7)) : null; } catch {}
+            if (!res) {
+              const detail = ((body.stderr || "").trim() || (body.stdout || "").trim());
+              setResult({ tone: "bad", text: `no result from node${detail ? ` — ${detail}` : ""}` });
+              return;
+            }
+            if (Array.isArray(res.gpus) && res.gpus.length) {
+              setGstat(prev => {
+                const m = new Map((prev || []).map(g => [g.idx, g]));
+                res.gpus.forEach(g => m.set(g.idx, g));
+                return [...m.values()].sort((x, y) => x.idx - y.idx);
+              });
+            }
+            if (!quiet || !res.ok) setResult({ tone: res.ok ? "ok" : "bad", text: res.msg + (res.detail ? `\n${res.detail}` : "") });
+          } catch (err) {
+            setResult({ tone: "bad", text: String(err && err.message || err) });
+          } finally { setBusy(false); }
+        }
+
+        useEffect(() => {
+          if (isNv && token && gstat === null) runTune({ op: "status" }, { quiet: true });
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [isNv, token]);
+
+        // Limits for the current target: intersect across targeted GPUs.
+        const lim = tgt.length ? {
+          pMin: Math.max(...tgt.map(g => g.power_min || 0)),
+          pMax: Math.min(...tgt.map(g => g.power_max || 1000)),
+          smMin: Math.max(...tgt.map(g => g.sm_min || 0)),
+          smMax: Math.min(...tgt.map(g => g.sm_max || 0)),
+          mem: tgt.map(g => g.mem_supported || []).reduce((a, b) => a.filter(x => b.includes(x))),
+          vbMax: Math.min(...tgt.map(g => (g.vboost_max == null ? -1 : g.vboost_max))),
+        } : null;
+        const uniq = (k) => [...new Set(tgt.map(g => g[k]))];
+        const lockText = (g) => g.sm_lock ? `${g.sm_lock.min}–${g.sm_lock.max}`
+                              : g.sm_lock_external ? `external? (idle at ${Math.round(g.sm_mhz)})` : "unlocked";
+        const lockSummary = [...new Set(tgt.map(lockText))];
+
         function applyPowerCap() {
-          if (!supported || !selected) return;
           const w = parseInt(customW, 10);
-          if (!Number.isFinite(w) || w < 1 || w > 1000) return;
+          if (!Number.isFinite(w)) return;
+          if (isNv) return runTune({ op: "power", gpus: targetIds, watts: w });
+          if (!cmds || !selected || w < 1 || w > 1000) return;
           runExec(cmds.setPowerCap(selected.idx, w));
         }
-        function applyPerfLevel() {
-          if (!supported || !selected) return;
-          runExec(cmds.setPerfLevel(selected.idx, level));
-        }
+        function applyPerfLevel() { if (cmds && selected) runExec(cmds.setPerfLevel(selected.idx, level)); }
         function restoreDefaults() {
-          if (!supported || !selected) return;
-          runExec(cmds.restore(selected.idx));
+          if (isNv) return (async () => {
+            await runTune({ op: "reset_clocks", gpus: targetIds });
+            await runTune({ op: "reset_memclock", gpus: targetIds }, { quiet: true });
+            if (lim && lim.vbMax >= 0) await runTune({ op: "vboost", gpus: targetIds, value: 0 }, { quiet: true });
+            setResult({ tone: "ok", text: `GPU ${targetIds.join(",")}: SM clock lock removed, memory clock lock removed, vboost 0 (power cap unchanged)` });
+          })();
+          if (cmds && selected) runExec(cmds.restore(selected.idx));
         }
 
         const vendorLabel = vendor === "unknown" ? "unknown" : vendor.toUpperCase();
         const capNum = selected && selected.powerCapW > 0 ? Math.round(selected.powerCapW) : 0;
-        const presetsW = capNum > 0
-          ? [Math.round(capNum * 0.5), Math.round(capNum * 0.7), Math.round(capNum * 0.85), capNum]
-          : [100, 150, 200, 250];
+        const presetsW = isNv && lim
+          ? [200, 250, 300, 350, 400, 450, 500, 600].filter(w => w >= lim.pMin && w <= lim.pMax)
+          : capNum > 0 ? [Math.round(capNum * 0.5), Math.round(capNum * 0.7), Math.round(capNum * 0.85), capNum] : [100, 150, 200, 250];
         const levelOpts = [
-          { k: "low",         lbl: "Low (power save)" },
-          { k: "balanced",    lbl: "Balanced (default)" },
-          { k: "performance", lbl: "Performance" },
-          { k: "max",         lbl: "Max" },
+          { k: "low", lbl: "Low (power save)" }, { k: "balanced", lbl: "Balanced (default)" },
+          { k: "performance", lbl: "Performance" }, { k: "max", lbl: "Max" },
         ];
         const wVal = parseInt(customW, 10);
-        const wValid = Number.isFinite(wVal) && wVal >= 1 && wVal <= 1000;
+        const wValid = isNv ? (lim && Number.isFinite(wVal) && wVal >= lim.pMin && wVal <= lim.pMax)
+                            : (Number.isFinite(wVal) && wVal >= 1 && wVal <= 1000);
+        const cMin = parseInt(clkMin, 10), cMax = parseInt(clkMax, 10);
+        const clkValid = !!lim && Number.isFinite(cMin) && Number.isFinite(cMax) && lim.smMin <= cMin && cMin <= cMax && cMax <= lim.smMax;
+        const clkPresets = [1000, 1200, 1400, 1600];
+        const canTune = isNv && token && !busy && !!lim;
         const inputStyle = { flex: 1, padding: "6px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface-2)", color: "var(--ink)", fontFamily: "var(--mono)", fontSize: 13 };
+        const sectionLbl = { fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 };
+        const mono = { fontFamily: "var(--mono)", fontSize: 12, color: "var(--muted)" };
 
         return (
           <div className="nd-modal-bg" onClick={e => e.target === e.currentTarget && onClose()}>
-            <div className="nd-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 640, height: "auto" }}>
+            <div className="nd-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 680, height: "auto", maxHeight: "92vh", overflowY: "auto" }}>
               <div className="nd-modal-head">
                 <span className="nd-modal-title">GPU Tuning · {nodeId}</span>
-                <span className="nd-modal-warn">⚠ Per-GPU · root</span>
+                <span className="nd-modal-warn">⚠ {isNv && allGpus ? `All ${gpus.length} GPUs` : "Per-GPU"} · root</span>
                 <button className="nd-modal-close" onClick={onClose} title="Close (Esc)">×</button>
               </div>
 
               <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
                 {(gpus.length === 0 || node.gpuPlaceholder) ? (
-                  <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+                  <div style={mono}>
                     <em>No GPU available on this node.</em>
                     <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.5 }}>
                       If a GPU is physically present, verify that <code>rocm-smi</code> (AMD) or <code>nvidia-smi</code> (NVIDIA) is installed and on <code>$PATH</code> for the worker. See <code>worker/src/collectors/gpu_collector.cpp</code>.
@@ -1630,27 +1704,45 @@
                   <>
                     {gpus.length > 1 && (
                       <div>
-                        <div style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>GPU</div>
-                        <select value={sel} onChange={e => { setSel(parseInt(e.target.value, 10) || 0); setResult(null); }}
-                          style={{ ...inputStyle, width: "100%", fontSize: 12 }}>
-                          {gpus.map(g => (
-                            <option key={g.idx} value={g.idx}>
-                              GPU {g.idx} · {g.vendor.toUpperCase()} · {Math.round(g.tempC)}°C · {Math.round(g.powerW)}W
-                            </option>
-                          ))}
-                        </select>
+                        <div style={sectionLbl}>GPU</div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <select value={sel} onChange={e => { setSel(parseInt(e.target.value, 10) || 0); setResult(null); }}
+                            disabled={isNv && allGpus} style={{ ...inputStyle, fontSize: 12, opacity: isNv && allGpus ? 0.5 : 1 }}>
+                            {gpus.map(g => (
+                              <option key={g.idx} value={g.idx}>
+                                GPU {g.idx} · {g.vendor.toUpperCase()} · {Math.round(g.tempC)}°C · {Math.round(g.powerW)}W
+                              </option>
+                            ))}
+                          </select>
+                          {isNv && (
+                            <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12, cursor: "pointer", whiteSpace: "nowrap" }}>
+                              <input type="checkbox" checked={allGpus} onChange={e => setAllGpus(e.target.checked)} />
+                              Apply to all {gpus.length}
+                            </label>
+                          )}
+                        </div>
                       </div>
                     )}
 
-                    {selected && (
-                      <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+                    {selected && !(isNv && allGpus) && (
+                      <div style={mono}>
                         GPU {selected.idx} · <b style={{ color: "var(--ink)" }}>{vendorLabel}</b>
                         {" · "}<b style={{ color: "var(--ink)" }}>{Math.round(selected.tempC)}°C</b>
                         {" · "}<b style={{ color: "var(--ink)" }}>{Math.round(selected.powerW)}W</b>
                         {selected.powerCapW > 0 && <> / <b style={{ color: "var(--ink)" }}>{Math.round(selected.powerCapW)}W cap</b></>}
                         {selected.clockMhz > 0 && <> · <b style={{ color: "var(--ink)" }}>{Math.round(selected.clockMhz)} MHz</b></>}
-                        {selected.memTotalMb > 0 && <> · {Math.round((selected.memUsedMb||0) / 1024)}/{Math.round(selected.memTotalMb/1024)} GiB VRAM</>}
                         {" · "}util <b style={{ color: "var(--ink)" }}>{Math.round(selected.utilPct)}%</b>
+                      </div>
+                    )}
+                    {isNv && tgt.length > 0 && (
+                      <div style={mono}>
+                        now: cap <b style={{ color: "var(--ink)" }}>{uniq("power_limit").map(v => Math.round(v)).join("/")} W</b>
+                        {" · "}SM <b style={{ color: "var(--ink)" }}>{uniq("sm_mhz").map(v => Math.round(v)).join("/")} MHz</b>
+                        {" "}(lock <b style={{ color: tgt.some(g => g.sm_lock || g.sm_lock_external) ? "var(--warn)" : "var(--ink)" }}>{lockSummary.join(" / ")}</b>)
+                        {" · "}HBM <b style={{ color: "var(--ink)" }}>{uniq("mem_mhz").map(v => Math.round(v)).join("/")} MHz</b>
+                        {tgt.some(g => g.mem_deferred) && <span style={{ color: "var(--warn)" }}> (→ {uniq("mem_deferred").map(v => v || "—").join("/")} after reset)</span>}
+                        {" · "}vboost <b style={{ color: "var(--ink)" }}>{uniq("vboost").join("/")}</b>
+                        {tgt.length > 1 && <> · {tgt.length} GPUs</>}
                       </div>
                     )}
 
@@ -1659,7 +1751,7 @@
                         background: "color-mix(in oklab, var(--warn) 12%, var(--surface-2))",
                         color: "var(--ink)", border: "1px solid color-mix(in oklab, var(--warn) 40%, var(--line))", lineHeight: 1.5 }}>
                         <div style={{ fontWeight: 700, marginBottom: 4, color: "var(--warn)" }}>GPU tuning is not supported for this vendor.</div>
-                        Detected: <b>{vendorLabel}</b>. This card has verified command templates only for AMD (<code>rocm-smi</code>) and NVIDIA (<code>nvidia-smi</code>). Add opcodes to the <code>GPU_CMDS</code> table in <code>server/web/node.html</code> to extend.
+                        Detected: <b>{vendorLabel}</b>. Supported: NVIDIA (<code>gputune_exec.py</code>) and AMD (<code>rocm-smi</code> templates in <code>GPU_CMDS</code>).
                       </div>
                     )}
 
@@ -1674,42 +1766,105 @@
                     ) : (
                       <div className="nd-shell-tokenrow" style={{ margin: 0 }}>
                         <span className="lbl">Token</span>
-                        <span style={{ flex: 1, fontFamily: "var(--mono)", fontSize: 12, color: "var(--muted)" }}>•••••••• (session)</span>
+                        <span style={{ flex: 1, ...mono }}>•••••••• (session)</span>
                         <span className="change" onClick={() => { setEditingToken(true); setTokenDraft(""); }}>[change]</span>
                       </div>
                     )}
 
-                    <div>
-                      <div style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>Power cap (W)</div>
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-                        {presetsW.map(p => (
-                          <button key={p} className="nd-freq-preset" disabled={!supported}
-                            onClick={() => setCustomW(String(p))}
-                            style={{ opacity: supported ? 1 : 0.5, cursor: supported ? "pointer" : "not-allowed" }}
-                            title={`${p} W`}>
-                            {p}W
-                          </button>
-                        ))}
-                      </div>
-                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        <input type="number" value={customW} onChange={e => setCustomW(e.target.value)}
-                          disabled={!supported}
-                          placeholder="Watts (1–1000)" min={1} max={1000}
-                          style={{ ...inputStyle, opacity: supported ? 1 : 0.5 }} />
-                        <button className="nd-freq-btn" onClick={applyPowerCap} disabled={!supported || !token || busy || !wValid}>Apply</button>
-                      </div>
-                    </div>
+                    {isNv && token && !gstat && <div style={mono}>{busy ? "reading GPU limits…" : "GPU limits not loaded"}</div>}
 
-                    <div>
-                      <div style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>Clock / perf level</div>
-                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        <select value={level} onChange={e => setLevel(e.target.value)} disabled={!supported}
-                          style={{ ...inputStyle, fontSize: 12, opacity: supported ? 1 : 0.5 }}>
-                          {levelOpts.map(o => <option key={o.k} value={o.k}>{o.lbl}</option>)}
-                        </select>
-                        <button className="nd-freq-btn" onClick={applyPerfLevel} disabled={!supported || !token || busy}>Set</button>
+                    {supported && (
+                      <div>
+                        <div style={sectionLbl}>Power cap (W){isNv && lim ? ` · ${lim.pMin}–${lim.pMax}` : ""}</div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                          {presetsW.map(p => (
+                            <button key={p} className="nd-freq-preset" onClick={() => setCustomW(String(p))} title={`${p} W`}>{p}W</button>
+                          ))}
+                        </div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <input type="number" value={customW} onChange={e => setCustomW(e.target.value)}
+                            placeholder={isNv && lim ? `Watts (${lim.pMin}–${lim.pMax})` : "Watts (1–1000)"} style={inputStyle} />
+                          <button className="nd-freq-btn" onClick={applyPowerCap}
+                            disabled={!token || busy || !wValid || (isNv && !lim)}>Apply</button>
+                        </div>
                       </div>
-                    </div>
+                    )}
+
+                    {isNv && (
+                      <div>
+                        <div style={sectionLbl}>SM clock range (MHz){lim ? ` · allowed ${lim.smMin}–${lim.smMax}` : ""}</div>
+                        {tgt.length > 0 && (
+                          <div style={{ ...mono, marginBottom: 8 }}>
+                            {tgt.length === 1 ? "Locked range" : "Locked ranges"}:{" "}
+                            {tgt.length === 1
+                              ? <b style={{ color: tgt[0].sm_lock ? "var(--warn)" : "var(--ink)" }}>{lockText(tgt[0])}{tgt[0].sm_lock ? " MHz" : ""}</b>
+                              : tgt.map(g => <span key={g.idx} style={{ marginRight: 8 }}>GPU{g.idx} <b style={{ color: g.sm_lock ? "var(--warn)" : "var(--ink)" }}>{lockText(g)}</b></span>)}
+                            {tgt.some(g => g.sm_lock_external) && <div style={{ fontSize: 11, marginTop: 2 }}>"external?" = no cockpit record, but the idle GPU runs above its {lim ? lim.smMin : 345} MHz floor — likely locked with nvidia-smi directly; the exact range isn't readable from the driver.</div>}
+                          </div>
+                        )}
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                          {clkPresets.map(c => (
+                            <button key={c} className="nd-freq-preset" title={`lock at ${c} MHz`}
+                              onClick={() => { setClkMin(String(c)); setClkMax(String(c)); }}>{c}</button>
+                          ))}
+                          {lim && <button className="nd-freq-preset" title="whole supported range"
+                            onClick={() => { setClkMin(String(lim.smMin)); setClkMax(String(lim.smMax)); }}>full range</button>}
+                        </div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <input type="number" value={clkMin} onChange={e => setClkMin(e.target.value)} placeholder="min" style={inputStyle} />
+                          <span style={{ color: "var(--muted)" }}>–</span>
+                          <input type="number" value={clkMax} onChange={e => setClkMax(e.target.value)} placeholder="max" style={inputStyle} />
+                          <button className="nd-freq-btn" disabled={!canTune || !clkValid}
+                            onClick={() => runTune({ op: "clocks", gpus: targetIds, min: cMin, max: cMax })}>Lock</button>
+                          <button className="nd-freq-btn" disabled={!canTune}
+                            onClick={() => runTune({ op: "reset_clocks", gpus: targetIds })}>Unlock</button>
+                        </div>
+                      </div>
+                    )}
+
+                    {isNv && (
+                      <div>
+                        <div style={sectionLbl}>HBM memory clock (MHz) · applies after GPU reset / reboot</div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <select value={memMhz} onChange={e => setMemMhz(e.target.value)} disabled={!lim}
+                            style={{ ...inputStyle, fontSize: 12 }}>
+                            <option value="">{lim ? "choose…" : "—"}</option>
+                            {(lim ? lim.mem : []).map(m => <option key={m} value={m}>{m} MHz</option>)}
+                          </select>
+                          <button className="nd-freq-btn" disabled={!canTune || !memMhz}
+                            onClick={() => runTune({ op: "memclock", gpus: targetIds, mhz: parseInt(memMhz, 10) })}>Lock</button>
+                          <button className="nd-freq-btn" disabled={!canTune}
+                            onClick={() => runTune({ op: "reset_memclock", gpus: targetIds })}>Unlock</button>
+                        </div>
+                      </div>
+                    )}
+
+                    {isNv && lim && lim.vbMax >= 0 && (
+                      <div>
+                        <div style={sectionLbl}>vboost (boost slider) · 0–{lim.vbMax}</div>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                          {Array.from({ length: lim.vbMax + 1 }, (_, v) => (
+                            <button key={v} className="nd-freq-preset"
+                              style={{ background: vbVal === v ? "var(--accent-soft)" : undefined, fontWeight: uniq("vboost").length === 1 && uniq("vboost")[0] === v ? 800 : undefined }}
+                              onClick={() => setVbVal(v)} title={v === 0 ? "off (default)" : `level ${v}`}>{v === 0 ? "0 · off" : v}</button>
+                          ))}
+                          <button className="nd-freq-btn" disabled={!canTune || vbVal === null}
+                            onClick={() => runTune({ op: "vboost", gpus: targetIds, value: vbVal })}>Set</button>
+                        </div>
+                      </div>
+                    )}
+
+                    {cmds && !isNv && (
+                      <div>
+                        <div style={sectionLbl}>Clock / perf level</div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <select value={level} onChange={e => setLevel(e.target.value)} style={{ ...inputStyle, fontSize: 12 }}>
+                            {levelOpts.map(o => <option key={o.k} value={o.k}>{o.lbl}</option>)}
+                          </select>
+                          <button className="nd-freq-btn" onClick={applyPerfLevel} disabled={!token || busy}>Set</button>
+                        </div>
+                      </div>
+                    )}
 
                     {result && (
                       <div style={{ fontFamily: "var(--mono)", fontSize: 12, padding: "6px 10px", borderRadius: 6,
@@ -1721,11 +1876,15 @@
 
                     {supported && (
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--line)", paddingTop: 10 }}>
-                        <span onClick={busy ? undefined : restoreDefaults}
-                          style={{ fontSize: 11, color: busy ? "var(--muted)" : "var(--accent)", cursor: busy ? "default" : "pointer", textDecoration: "underline", textDecorationStyle: "dotted" }}>
-                          Restore (reset cap + perf to default)
+                        <span onClick={busy || !token ? undefined : restoreDefaults}
+                          style={{ fontSize: 11, color: busy || !token ? "var(--muted)" : "var(--accent)", cursor: busy || !token ? "default" : "pointer", textDecoration: "underline", textDecorationStyle: "dotted" }}>
+                          {isNv ? "Restore clocks (unlock SM + HBM, vboost 0; power cap unchanged)" : "Restore (reset cap + perf to default)"}
                         </span>
-                        <span style={{ fontSize: 10, color: "var(--muted)" }}>{busy ? "running…" : ""}</span>
+                        <span style={{ fontSize: 10, color: "var(--muted)" }}>
+                          {busy ? "running…" : isNv ? "locks last until reset or reboot" : ""}
+                          {isNv && token && !busy && <span className="change" style={{ marginLeft: 8, cursor: "pointer" }}
+                            onClick={() => runTune({ op: "status" })}>[refresh]</span>}
+                        </span>
                       </div>
                     )}
                   </>
@@ -2114,11 +2273,36 @@
                   // across, and the default 4-across grid for anything denser.
                   // Indices are discovered from the data and sorted
                   // numerically, so no sensor count is baked in anywhere.
+                  // The per-domain layouts below assume this chassis's sensor
+                  // counts, but another node can report a different number --
+                  // ntu-scc02 exposes 9 NIC sensors where ntu-scc01 has 1. A
+                  // layout is therefore a *preference* that degrades when the
+                  // count does not fit it: nine cells in the single-column
+                  // "full" layout would stack full-width and, because the panel
+                  // grid uses grid-auto-rows:1fr, drag every other panel's
+                  // height along with it.
+                  const layoutFor = (pref, n) => {
+                    if (pref === "full")  return n <= 1 ? "full" : n <= 2 ? "wide" : "compact";
+                    if (pref === "wide")  return n <= 3 ? "wide" : "compact";
+                    if (pref === "tri")   return (n <= 3 || n % 3 === 0) ? "tri" : "compact";
+                    if (pref === "penta") return n === 5 ? "penta" : "compact";
+                    return "compact";
+                  };
+
                   const renderZones = (stem, nameFor, descFor, width) => ({ therm, warn, crit }) => {
-                    const wide = width === "wide" || width === "full";
-                    const gridCls = width === "full" ? "nd-full-grid"
-                                  : width === "tri" ? "nd-tri-grid"
-                                  : width === "penta" ? "nd-penta-grid"
+                    const re = new RegExp(`^${stem}(\\d+)_c$`);
+                    const idxs = Object.keys(therm)
+                      .map(k => { const m = k.match(re); return m ? parseInt(m[1], 10) : null; })
+                      .filter(i => i !== null)
+                      .sort((a, b) => a - b);
+
+                    // Decided from the real count, so it must come after idxs.
+                    // The empty case still renders one cell, hence the || 1.
+                    const layout = layoutFor(width, idxs.length || 1);
+                    const wide = layout === "wide" || layout === "full";
+                    const gridCls = layout === "full" ? "nd-full-grid"
+                                  : layout === "tri" ? "nd-tri-grid"
+                                  : layout === "penta" ? "nd-penta-grid"
                                   : wide ? "nd-cpu-grid" : "nd-zone-grid";
                     const cellCls = wide ? "nd-cpu-cell" : "nd-zone-cell";
                     const valCls  = wide ? "nd-cpu-val"  : "nd-zone-val";
@@ -2137,12 +2321,6 @@
                       );
                     };
 
-                    const re = new RegExp(`^${stem}(\\d+)_c$`);
-                    const idxs = Object.keys(therm)
-                      .map(k => { const m = k.match(re); return m ? parseInt(m[1], 10) : null; })
-                      .filter(i => i !== null)
-                      .sort((a, b) => a - b);
-
                     if (idxs.length === 0) {
                       // A worker predating per-sensor metrics publishes only the
                       // domain maximum. Render that as a single cell so the panel
@@ -2159,9 +2337,9 @@
 
                     // Columns per row, so the first and last of each row can
                     // anchor their popover inward instead of overhanging.
-                    const cols = width === "tri" ? 3
-                               : width === "penta" ? 5
-                               : (width === "full" || wide) ? idxs.length
+                    const cols = layout === "tri" ? 3
+                               : layout === "penta" ? 5
+                               : wide ? idxs.length
                                : 4;
                     const edgeOf = n => cols < 2 ? ""
                                       : n % cols === 0 ? "tip-start"
@@ -2175,7 +2353,8 @@
                           // domain's rather than treating absence as unknown.
                           therm[`${stem}${i}_warn_c`] ?? warn,
                           therm[`${stem}${i}_crit_c`] ?? crit,
-                          nameFor(i), descFor(i), edgeOf(n)))}
+                          nameFor(i, idxs.length, therm), descFor(i, idxs.length, therm),
+                          edgeOf(n)))}
                       </div>
                     );
                   };
@@ -2186,14 +2365,29 @@
                         i => `CPU${i}`,
                         i => `Processor package temperature, socket ${i}.`, "wide") },
                     { key: "dimm",    label: "DIMM",    render: renderZones("dimm",
-                        i => `DIMM group ${i}`,
-                        i => `Memory zone ${i} — one bank of DIMM slots, not a single module.`) },
+                        i => `Channel ${i}`,
+                        i => `Memory channel ${i}, read from the DIMM's own sensor through the CPU. Sockets run in order, so the first half is socket 0.`) },
                     { key: "nvme",    label: "NVMe",    render: renderZones("nvme",
-                        i => `NVMe group ${i}`,
-                        i => `Drive-bay group ${i} \u2014 a backplane sensor covering several NVMe drives.`, "wide") },
+                        i => `Drive ${i}`,
+                        i => `NVMe drive ${i} composite temperature, read from the drive's own sensor with its own critical limit. One cell per drive, not a backplane group.`, "wide") },
+                    // Driver codes mirror NicDriverCode() in thermal_collector.cpp.
+                    // mlx5 covers ConnectX-4..7 and the driver name cannot tell
+                    // the generation apart, so the label stops at "ConnectX".
                     { key: "nic",     label: "NIC",     render: renderZones("nic",
-                        () => "Network controller",
-                        () => "Onboard NIC, read in-band from the kernel \u2014 the BMC exposes no network sensor.", "full") },
+                        (i, n, t) => {
+                          const code = (t[`nic${i}_driver_code`] | 0);
+                          if (code === 2) return `ConnectX ${i}`;
+                          if (code === 1) return "Onboard NIC";
+                          return n > 1 ? `NIC ${i}` : "Network controller";
+                        },
+                        (i, n, t) => {
+                          const code = (t[`nic${i}_driver_code`] | 0);
+                          if (code === 2) return "Mellanox/NVIDIA ConnectX (mlx5). A dual-port card reports the same die temperature on both ports, so cards appear as pairs.";
+                          if (code === 1) return "Onboard Intel 1GbE controller (igb).";
+                          if (code === 3) return "Intel 10/100GbE controller (ixgbe/ice).";
+                          if (code === 4) return "Broadcom NetXtreme controller (bnxt).";
+                          return "Network controller, read in-band from the kernel \u2014 the BMC exposes no network sensor.";
+                        }, "full") },
                     { key: "psu",     label: "PSU",     render: renderZones("psu",
                         i => `PSU ${i + 1}`,
                         i => `Power supply ${i + 1} internal hotspot \u2014 rises with the current it delivers.`) },
