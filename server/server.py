@@ -737,6 +737,11 @@ STATUS_RANK = {"ok": 0, "warn": 1, "crit": 2}
 STATUS_COLOR = {"ok": 0x3BA55D, "warn": 0xE8A33D, "crit": 0xE0524A}
 STATUS_EMOJI = {"ok": "\U0001F7E2", "warn": "\U0001F7E1", "crit": "\U0001F534"}
 STATUS_WORD = {"ok": "recovered", "warn": "warning", "crit": "critical"}
+
+# Discord MessageFlags.SUPPRESS_NOTIFICATIONS. The message still posts and is
+# still highlighted in the channel, it just does not push or ping. Only "crit"
+# is worth waking someone for; warnings and recoveries post silently.
+DISCORD_SILENT = 1 << 12
 # Leading emoji per reason, matched on the text the evaluator produces, so a
 # glance at the message says which subsystem moved without reading the words.
 REASON_EMOJI = (
@@ -1024,6 +1029,11 @@ class AlertNotifier:
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
             }],
         }
+        # A batch can carry several nodes; it rings only if the worst of them
+        # is critical, so one crit is never silenced by warnings beside it.
+        silent = worst != "crit"
+        if silent:
+            payload["flags"] = DISCORD_SILENT
 
         request = urllib.request.Request(
             self._url,
@@ -1041,7 +1051,8 @@ class AlertNotifier:
         except Exception as exc:
             print(f"discord_post_failed msg={type(exc).__name__} events={len(events)}")
             return
-        print(f"discord_post ok status={code} events={len(events)} worst={worst}")
+        print(f"discord_post ok status={code} events={len(events)} worst={worst}"
+              f" mode={'silent' if silent else 'notify'}")
 
 
 class UdpHandler(socketserver.BaseRequestHandler):
