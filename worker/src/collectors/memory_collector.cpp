@@ -25,7 +25,10 @@ namespace {
 //
 // 24 invocations cost ~160 ms, against a default 5 s interval.
 constexpr int kDimmAddrBase = 0x20;
-constexpr int kDimmChannels[] = {0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13};
+// Low nibbles 8..13 alias 0..5 -- verified by reading temperatures (a stable
+// signal, unlike power) at both halves across repeated trials and getting
+// identical values to 0.25 C. Summing all twelve double-counted every DIMM.
+constexpr int kDimmChannels[] = {0, 1, 2, 3, 4, 5};
 constexpr int kMaxSockets = 8;
 
 bool ReadDimmWatts(int socket, int addr, double& watts) {
