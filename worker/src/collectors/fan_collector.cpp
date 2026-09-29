@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cctype>
 #include <cstdio>
 #include <fstream>
@@ -178,6 +179,7 @@ class FanCollector : public Collector {
   std::string Name() const override { return "fan"; }
 
   bool Collect(std::vector<Metric>& out, std::string& error) override {
+    RedetectIfUnknown();
     out.push_back(Metric{"fan", "vendor_code", static_cast<double>(vendor_code_), "enum"});
     if (bmc_ipv4_packed_ > 0.0) {
       // 32-bit packed IPv4 (big-endian). UI decodes:
@@ -289,6 +291,24 @@ class FanCollector : public Collector {
     return 0;
   }
 
+  // Detection used to run once, at start-up. A BMC that was slow or busy at
+  // that moment (the Redfish probe allows 3-5 s) left identical nodes stuck
+  // as vendor "unknown" until the worker restarted, which hid the UI's fan
+  // controls. Retry every kRedetectPeriod while either result is missing.
+  void RedetectIfUnknown() {
+    if (vendor_code_ != 0 && !bmc_ip_.empty()) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_detect_ < kRedetectPeriod) return;
+    last_detect_ = now;
+    if (bmc_ip_.empty()) {
+      bmc_ip_ = DiscoverBmcIp();
+      bmc_ipv4_packed_ = Ipv4ToPacked(bmc_ip_);
+    }
+    if (vendor_code_ == 0) vendor_code_ = DetectVendor(bmc_ip_);
+  }
+
+  static constexpr std::chrono::minutes kRedetectPeriod{5};
+  std::chrono::steady_clock::time_point last_detect_ = std::chrono::steady_clock::now();
   bool last_available_ = true;
   std::string bmc_ip_ = DiscoverBmcIp();
   double bmc_ipv4_packed_ = Ipv4ToPacked(bmc_ip_);
