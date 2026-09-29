@@ -1130,6 +1130,15 @@ class ApiHandler(SimpleHTTPRequestHandler):
         web_dir = kwargs.pop("web_dir")
         super().__init__(*args, directory=web_dir, **kwargs)
 
+    def end_headers(self) -> None:
+        # Without this the browser may reuse a cached node.html after an
+        # update (heuristic caching off Last-Modified), which once kept the
+        # removed fan-control code running. "no-cache" still allows the
+        # cache, but forces a revalidation (cheap 304) on every load.
+        if not self.path.startswith("/api/"):
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
     def do_GET(self) -> None:
         if self.path == "/api/config":
             self._json({"test_panel": self.test_mode})
