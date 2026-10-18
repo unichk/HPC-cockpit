@@ -1,0 +1,1 @@
+time,node,node_w,gpu_w,gpu_util_mean,gpu_clk_min,gpu_clk_mean,p12v_max_a,sys_rpm,rear_rpm,cpu_rpm,HIC,GPU,CPU,DIMM,VR,NIC,NVMe,PSU,thermal_slow,pwrcap_gpus

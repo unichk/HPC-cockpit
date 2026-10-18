@@ -1,0 +1,13 @@
+===== scc02 (172.16.67.12)
+   was active: { "strMode": "SCC26v2" }   backup -> backup/scc02-collection-20261014-201053.json
+   create SCC26v3: http 200
+   activate: http 200 { "strMode": "SCC26v3" }
+   verify: active=True  stored-as-built=True  stock-default-untouched=True
+===== scc01 (172.16.67.11)
+   was active: { "strMode": "SCC26v2" }   backup -> backup/scc01-collection-20261014-212156.json
+   activate: http 200 { "strMode": "SCC26v3" }
+   verify: active=True  stored-as-built=True  stock-default-untouched=True
+===== scc03 (172.16.67.13)
+   was active: { "strMode": "SCC26v2" }   backup -> backup/scc03-collection-20261014-212158.json
+   activate: http 200 { "strMode": "SCC26v3" }
+   verify: active=True  stored-as-built=True  stock-default-untouched=True

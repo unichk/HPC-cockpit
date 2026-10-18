@@ -1,0 +1,9 @@
+
+===== scc03 (172.16.67.13)
+   was active: { "strMode": "SCC26v1" }   backup -> backup/scc03-collection-20261014-123615.json
+   create SCC26v2: http 200
+   activate: http 200 { "strMode": "SCC26v2" }
+   verify: active=True  stored-as-built=True  stock-default-untouched=True
+===== scc04 (172.16.67.14)
+   was active: { "strMode": "SCC26v1" }   backup -> backup/scc04-collection-20261014-221454.json
+2026-10-14 22:15:35 scc04 -> SCC26v2 (2nd attempt; 1st stopped after backup)

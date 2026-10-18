@@ -1,0 +1,6 @@
+
+===== scc03 (172.16.67.13)
+   was active: { "strMode": "SCC26v1" }   backup -> backup/scc03-collection-20261014-122600.json
+   update SCC26v1: http 200
+   activate: http 200 { "strMode": "SCC26v1" }
+   verify: active=True  stored-as-built=True  stock-default-untouched=True

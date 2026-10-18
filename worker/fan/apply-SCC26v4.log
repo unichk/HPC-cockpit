@@ -1,0 +1,42 @@
+
+===== scc01 (ntu-scc01-bmc)
+   was active: { "strMode": "SCC26v3" }   backup -> backup/scc01-collection-20261017-014641.json
+   create SCC26v4: http 200
+   activate: http 200 { "strMode": "SCC26v4" }
+   verify: active=True  stored-as-built=True  stock-default-untouched=True
+
+===== scc02 (ntu-scc02-bmc)
+   was active: { "strMode": "SCC26v3" }   backup -> backup/scc02-collection-20261017-014643.json
+   create SCC26v4: http 200
+   activate: http 200 { "strMode": "SCC26v4" }
+   verify: active=True  stored-as-built=True  stock-default-untouched=True
+
+===== scc03 (ntu-scc03-bmc)
+   was active: { "strMode": "SCC26v3" }   backup -> backup/scc03-collection-20261017-014646.json
+   create SCC26v4: http 200
+   activate: http 200 { "strMode": "SCC26v4" }
+   verify: active=True  stored-as-built=True  stock-default-untouched=True
+
+===== scc01 (ntu-scc01-bmc)
+   was active: { "strMode": "SCC26v4" }   backup -> backup/scc01-collection-20261017-015337.json
+   update SCC26v4: http 200
+   activate: http 200 { "strMode": "SCC26v4" }
+   verify: active=True  stored-as-built=True  stock-default-untouched=True
+
+===== scc02 (ntu-scc02-bmc)
+   was active: { "strMode": "SCC26v4" }   backup -> backup/scc02-collection-20261017-015339.json
+   update SCC26v4: http 200
+   activate: http 200 { "strMode": "SCC26v4" }
+   verify: active=True  stored-as-built=True  stock-default-untouched=True
+
+===== scc03 (ntu-scc03-bmc)
+   was active: { "strMode": "SCC26v4" }   backup -> backup/scc03-collection-20261017-015341.json
+   update SCC26v4: http 200
+   activate: http 200 { "strMode": "SCC26v4" }
+   verify: active=True  stored-as-built=True  stock-default-untouched=True
+
+===== scc04 (ntu-scc04-bmc)
+   was active: { "strMode": "SCC26v2" }   backup -> backup/scc04-collection-20261017-231412.json
+   create SCC26v4: http 200
+   activate: http 200 { "strMode": "SCC26v4" }
+   verify: active=True  stored-as-built=True  stock-default-untouched=True

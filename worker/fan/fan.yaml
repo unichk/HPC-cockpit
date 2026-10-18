@@ -1,0 +1,109 @@
+# fan.yaml — declarative BMC fan policy for the G494-ZB4 nodes
+#
+# PROPOSAL ONLY — nothing here has been applied to a BMC.
+#
+# The BMC stores its fan curve as a table of policies, each a 2-point ramp:
+#   arrSensor[]    IPMI sensor numbers that drive the policy
+#   arrFanSensor[] fan sensor numbers it controls
+#   arrRef[]       [knee, full]  temperatures
+#   arrDuty[]      [floor, end]  duty at those temperatures
+#   iHysteresis    deadband, currently 0 on every policy
+#
+# A fan runs at the MAXIMUM duty any policy asks of it, so one warm sensor
+# raises every fan it touches. Sensor *names* are used here rather than the
+# BMC's numbers because the two nodes do not have the same sensor set --
+# scc02 has 9 NIC sensors, no DIMM temperatures, and 2 board sensors against
+# scc01's 5. The applier resolves names per node from that node's SDR.
+
+version: 1
+
+targets:
+  - name: ntu-scc01
+    bmc: ntu-scc01-bmc
+  - name: ntu-scc02
+    bmc: ntu-scc02-bmc
+
+# The applier refuses to write a table that violates these.
+safety:
+  min_floor_duty: 30        # never author a floor below the stock 30%
+  min_knee_margin_c: 10     # knee must sit >= (observed idle + margin), or the
+                            # policy pins its fans permanently -- which is
+                            # exactly the current HIC bug
+  min_headroom_to_warn_c: 10  # `full` must stay this far under the BMC's own warn
+  dry_run_default: true     # never write unless --apply is passed explicitly
+  snapshot_before_write: true
+
+profiles:
+  # Maps to the BMC's arrProfile[0], strName "default" (the active one).
+  - name: default
+    floor_duty: 30
+
+    # Applied to every policy this file names. Currently 0 everywhere, so a
+    # sensor resting near its knee makes the fans hunt with nothing damping
+    # it. Matters more once knees move closer to real operating temperatures.
+    hysteresis: 2
+
+    policies:
+      # ---------------------------------------------------------------
+      # THE ONE THAT MATTERS.
+      # HIC boards idle at 70C (scc01) and 77C (scc02) but the stock knee
+      # is 55C, so both nodes sit permanently on the ramp and the 24-fan
+      # SYS wall can never return to floor -- at 60% and 74% duty while
+      # every other sensor has 40C+ of margin. Fan power goes as RPM^3,
+      # so that is ~8x and ~15x floor power for no thermal benefit.
+      # The BMC's own limits for HIC are 105 warn / 110 crit.
+      # ---------------------------------------------------------------
+      - name: hic
+        sensors: [HIC_TEMP_0, HIC_TEMP_1]
+        fans: [SYS]
+        curve: { knee: 85, full: 105 }
+
+      # Unchanged from stock. CPUs idle at 45-57C, so a 55C knee already
+      # clips slightly on scc01; 70C gives real margin without touching
+      # the top of the ramp. CPU warn is 97C.
+      - name: cpu
+        sensors: [CPU0_TEMP, CPU1_TEMP]
+        fans: [SYS, CPU]
+        curve: { knee: 70, full: 95 }
+
+      # DDR5 throttles near 85C; BMC warn is 85 (scc01) / 80 (scc02).
+      # Stock knee 55 is well below the 32-38C these actually run at, so
+      # this one is harmless today -- raised for consistency and headroom.
+      - name: dimm
+        sensors: [DIMMG*_TEMP]
+        fans: [SYS]
+        curve: { knee: 65, full: 82 }
+
+      # M.2 ambient + NVMe group. Stock ramps 55->65, only 10C from floor
+      # to full -- the twitchiest policy in the table. A hot drive slams
+      # all 24 fans to 100%. Widened; drives currently run 30-32C.
+      - name: storage
+        sensors: [M2_AMB_TEMP*, NVMeG*_TEMP]
+        fans: [SYS]
+        curve: { knee: 60, full: 80 }
+
+      # Voltage regulators, specified to 115/120. Stock knee 55 is far
+      # below their 33-37C idle.
+      - name: vr
+        sensors: [VR_P*_TEMP]
+        fans: [SYS]
+        curve: { knee: 75, full: 105 }
+
+      # PSU hotspots, specified to 105/110, currently 33-38C.
+      - name: psu
+        sensors: [PSU*_HOTSPOT]
+        fans: [SYS]
+        curve: { knee: 70, full: 95 }
+
+  # Maps to arrProfile[1], strName "SPECpower" -- a 15% floor. Kept as-is;
+  # it is a benchmark-efficiency table, not a profile to run a loaded
+  # 8-GPU node on.
+  - name: SPECpower
+    inherit: default
+    floor_duty: 15
+
+# Policies deliberately NOT touched: the ~11 GPU-slot variants (each tuned
+# to a different GPU SKU's limit via the SupportPCIEDevice table), the
+# P12V_S* current-driven policy, the empty-slot policies, and the disabled
+# CPU->REAR policy at 127C. They are all sitting at floor and none of them
+# is the reason the fans are up.
