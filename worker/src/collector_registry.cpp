@@ -7,11 +7,12 @@ CollectorPtr CreateCpuCollector();
 CollectorPtr CreateMemoryCollector();
 CollectorPtr CreateLoadCollector();
 CollectorPtr CreateThermalCollector();
-CollectorPtr CreatePowerCollector();
+CollectorPtr CreatePowerCollector(const WorkerConfig& config);
 CollectorPtr CreateFanCollector();
 CollectorPtr CreateGpuCollector();
+CollectorPtr CreateHealthCollector();
 
-CollectorPtr CreateCollector(const std::string& name) {
+CollectorPtr CreateCollector(const std::string& name, const WorkerConfig& config) {
   if (name == "cpu") {
     return CreateCpuCollector();
   }
@@ -25,7 +26,7 @@ CollectorPtr CreateCollector(const std::string& name) {
     return CreateThermalCollector();
   }
   if (name == "power") {
-    return CreatePowerCollector();
+    return CreatePowerCollector(config);
   }
   if (name == "fan") {
     return CreateFanCollector();
@@ -33,9 +34,12 @@ CollectorPtr CreateCollector(const std::string& name) {
   if (name == "gpu") {
     return CreateGpuCollector();
   }
+  if (name == "health") {
+    return CreateHealthCollector();
+  }
   return nullptr;
 }
 
 std::vector<std::string> BuiltinCollectors() {
-  return {"cpu", "memory", "load", "thermal", "power", "fan", "gpu"};
+  return {"cpu", "memory", "load", "thermal", "power", "fan", "gpu", "health"};
 }

@@ -37,7 +37,11 @@ class StdoutTransport : public Transport {
       }
       line << "{\"module\":\"" << EscapeJson(metric.module) << "\",\"name\":\""
            << EscapeJson(metric.name) << "\",\"value\":" << metric.value << ",\"unit\":\""
-           << EscapeJson(metric.unit) << "\"}";
+           << EscapeJson(metric.unit) << "\"";
+      if (!metric.text.empty()) {
+        line << ",\"text\":\"" << EscapeJson(metric.text) << "\"";
+      }
+      line << "}";
     }
     line << "]}";
     std::cout << line.str() << "\n" << std::flush;

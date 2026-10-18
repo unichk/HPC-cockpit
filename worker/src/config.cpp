@@ -123,6 +123,10 @@ bool LoadConfig(const std::string& path, WorkerConfig& config, std::string& erro
         error = "invalid exec_default_timeout_s at line " + std::to_string(line_no);
         return false;
       }
+    } else if (key == "bmc_user") {
+      config.bmc_user = value;
+    } else if (key == "bmc_password") {
+      config.bmc_password = value;
     } else {
       error = "unknown config key at line " + std::to_string(line_no) + ": " + key;
       return false;

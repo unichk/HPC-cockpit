@@ -1,6 +1,7 @@
 #include "transport.h"
 
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -8,6 +9,7 @@
 #include <zlib.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <map>
@@ -75,7 +77,11 @@ std::string ModuleToJson(const Snapshot& snapshot, const std::string& module,
     }
     line << "{\"module\":\"" << EscapeJson(metric.module) << "\",\"name\":\""
          << EscapeJson(metric.name) << "\",\"value\":" << metric.value << ",\"unit\":\""
-         << EscapeJson(metric.unit) << "\"}";
+         << EscapeJson(metric.unit) << "\"";
+    if (!metric.text.empty()) {
+      line << ",\"text\":\"" << EscapeJson(metric.text) << "\"";
+    }
+    line << "}";
   }
   line << "]}";
   return line.str();
@@ -83,8 +89,8 @@ std::string ModuleToJson(const Snapshot& snapshot, const std::string& module,
 
 class UdpTransport : public Transport {
  public:
-  UdpTransport(std::string host, int port, int socket_fd, sockaddr_in remote_address)
-      : host_(std::move(host)), port_(port), socket_fd_(socket_fd), remote_address_(remote_address) {}
+  UdpTransport(std::string host, int port, int socket_fd)
+      : host_(std::move(host)), port_(port), socket_fd_(socket_fd) {}
 
   ~UdpTransport() override {
     if (socket_fd_ >= 0) {
@@ -151,6 +157,9 @@ class UdpTransport : public Transport {
       return false;
     }
 
+    if (!Resolve(error)) {
+      return false;
+    }
     const auto bytes_sent =
         sendto(socket_fd_, payload->data(), payload->size(), 0,
                reinterpret_cast<const sockaddr*>(&remote_address_), sizeof(remote_address_));
@@ -162,13 +171,56 @@ class UdpTransport : public Transport {
     return true;
   }
 
- public:
+  // transport_udp_host may be a hostname, so the cockpit's address lives in
+  // /etc/hosts (or DNS) rather than in worker.conf. It is looked up again
+  // every kResolveEvery, so moving the cockpit or renumbering the network
+  // (e.g. at the competition venue) needs no worker restart, and a name that
+  // does not resolve yet at boot only delays the first sends.
+  bool Resolve(std::string& error) {
+    const auto now = std::chrono::steady_clock::now();
+    if (resolved_ && now - resolved_at_ < kResolveEvery) {
+      return true;
+    }
+    addrinfo hints {};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    addrinfo* result = nullptr;
+    const int rc = getaddrinfo(host_.c_str(), nullptr, &hints, &result);
+    if (rc != 0 || result == nullptr) {
+      // Keep using the last good address if there is one.
+      if (resolved_) {
+        return true;
+      }
+      error = "cannot resolve '" + host_ + "': " + gai_strerror(rc);
+      return false;
+    }
+    sockaddr_in address = *reinterpret_cast<const sockaddr_in*>(result->ai_addr);
+    // Ubuntu maps a host's own name to 127.0.1.1. Prefer a real address so
+    // the server records the node's network IP (it connects back to it for
+    // the exec channel), and fall back to loopback only when that is all.
+    for (const addrinfo* ai = result; ai != nullptr; ai = ai->ai_next) {
+      const auto* sin = reinterpret_cast<const sockaddr_in*>(ai->ai_addr);
+      if ((ntohl(sin->sin_addr.s_addr) >> 24) != 127) {
+        address = *sin;
+        break;
+      }
+    }
+    freeaddrinfo(result);
+    address.sin_port = htons(static_cast<uint16_t>(port_));
+    remote_address_ = address;
+    resolved_ = true;
+    resolved_at_ = now;
+    return true;
+  }
 
- private:
+  static constexpr std::chrono::seconds kResolveEvery{60};
+
   std::string host_;
   int port_;
   int socket_fd_;
-  sockaddr_in remote_address_;
+  sockaddr_in remote_address_ {};
+  bool resolved_ = false;
+  std::chrono::steady_clock::time_point resolved_at_ {};
 };
 
 }  // namespace
@@ -179,13 +231,9 @@ TransportPtr CreateUdpTransport(const std::string& host, int port) {
     return nullptr;
   }
 
-  sockaddr_in remote_address {};
-  remote_address.sin_family = AF_INET;
-  remote_address.sin_port = htons(static_cast<uint16_t>(port));
-  if (inet_pton(AF_INET, host.c_str(), &remote_address.sin_addr) != 1) {
+  if (host.empty()) {
     close(socket_fd);
     return nullptr;
   }
-
-  return std::make_unique<UdpTransport>(host, port, socket_fd, remote_address);
+  return std::make_unique<UdpTransport>(host, port, socket_fd);
 }

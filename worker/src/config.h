@@ -17,6 +17,10 @@ struct WorkerConfig {
   std::string exec_token;
   int exec_max_output_kb = 256;
   int exec_default_timeout_s = 30;
+
+  // BMC login for the Redfish PSU power reading. Empty -> DCMI only.
+  std::string bmc_user = "admin";
+  std::string bmc_password;
 };
 
 bool LoadConfig(const std::string& path, WorkerConfig& config, std::string& error);

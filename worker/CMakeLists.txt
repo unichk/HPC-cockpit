@@ -19,6 +19,7 @@ add_executable(hpc_worker
   src/collectors/power_collector.cpp
   src/collectors/fan_collector.cpp
   src/collectors/gpu_collector.cpp
+  src/collectors/health_collector.cpp
   src/transports/stdout_transport.cpp
   src/transports/udp_transport.cpp
 )

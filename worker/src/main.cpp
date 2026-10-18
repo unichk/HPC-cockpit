@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
   std::vector<CollectorPtr> collectors;
   collectors.reserve(config.modules.size());
   for (const auto& module_name : config.modules) {
-    auto collector = CreateCollector(module_name);
+    auto collector = CreateCollector(module_name, config);
     if (!collector) {
       std::cerr << "unknown module: " << module_name << "\n";
       return 1;

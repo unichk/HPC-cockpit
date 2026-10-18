@@ -255,7 +255,9 @@ if ${ENABLE}; then
 fi
 
 if ${START}; then
-  run_cmd systemctl start hpc-worker
+  # restart, not start: with --no-clean-reinstall the old worker is still
+  # running, and `start` on an active unit leaves the old binary in place.
+  run_cmd systemctl restart hpc-worker
 fi
 
 echo "service installed: ${UNIT_DST}"

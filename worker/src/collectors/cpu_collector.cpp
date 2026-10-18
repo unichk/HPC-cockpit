@@ -192,6 +192,40 @@ void CollectSocketPower(std::vector<Metric>& out) {
     }
     out.push_back(Metric{"cpu", "package_power_limit_w", limit_total, "watt"});
   }
+
+  // HSMP power-efficiency mode per socket (0 HighPerformance, 1
+  // PowerEfficiency, ...). Settable at runtime with
+  // `e_smi_tool --setpowerefficiencymode`; ~8 ms per socket to read.
+  //   | Socket[0] PowerEfficiencyMode            | 1                |
+  //   | Socket[0] PowerEfficiencyModeName        | PowerEfficiency  |
+  static const std::regex mode_row(R"(PowerEfficiencyMode\s*\|\s*([0-9]+))");
+  static const std::regex name_row(R"(PowerEfficiencyModeName\s*\|\s*([A-Za-z]+))");
+  for (std::size_t index = 0; index < watts.size(); ++index) {
+    const std::string command = "timeout 3s e_smi_tool --showcurrpwrefficiencymode " +
+                                std::to_string(index) + " 2>/dev/null";
+    FILE* mode_pipe = popen(command.c_str(), "r");
+    if (mode_pipe == nullptr) {
+      continue;
+    }
+    std::string mode_payload;
+    while (fgets(buffer.data(), static_cast<int>(buffer.size()), mode_pipe) != nullptr) {
+      mode_payload.append(buffer.data());
+    }
+    if (pclose(mode_pipe) != 0) {
+      continue;
+    }
+    std::smatch match;
+    if (!std::regex_search(mode_payload, match, mode_row)) {
+      continue;
+    }
+    const double mode = std::stod(match[1].str());
+    std::string name;
+    if (std::regex_search(mode_payload, match, name_row)) {
+      name = match[1].str();
+    }
+    out.push_back(Metric{"cpu", "socket" + std::to_string(index) + "_power_eff_mode", mode,
+                         "enum", name});
+  }
 }
 
 class CpuCollector : public Collector {
