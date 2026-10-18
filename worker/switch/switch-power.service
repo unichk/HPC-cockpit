@@ -1,0 +1,18 @@
+# /etc/systemd/system/switch-power.service
+# Sends the IB switch's power draw to the cockpit every 10 s.
+# Root's ssh key must log in to admin@ib-switch without a password, and the
+# switch's host key must already be in root's known_hosts (ssh to it once).
+[Unit]
+Description=IB switch power -> HPC cockpit
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/home
+
+[Service]
+ExecStart=/usr/bin/python3 /mnt/home/unicorn/HPC-cockpit/worker/switch/switch_power.py \
+  --switch admin@ib-switch --source ib-qm8700 --cockpit ntu-scc04:9000
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
