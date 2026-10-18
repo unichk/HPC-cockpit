@@ -231,10 +231,11 @@
   </head>
   <body>
     <div id="root"></div>
+    <script src="auth.js?v=1"></script>
     <script src="vendor/react.development.js"></script>
     <script src="vendor/react-dom.development.js"></script>
     <script src="vendor/babel.min.js"></script>
-    <script src="live-data.js?v=8"></script>
+    <script src="live-data.js?v=9"></script>
     <script type="text/babel">
       const { useState, useEffect, useMemo, useRef } = React;
       const THR = window.DEFAULT_THRESHOLDS;
@@ -682,6 +683,75 @@
           });
         }
 
+        // HSMP power-efficiency modes (e_smi_tool --setpowerefficiencymode).
+        const EFF_MODES = [
+          [0, "HighPerformance", "Fabric and boost at full speed (default)"],
+          [1, "PowerEfficiency", "Lower fabric/IO clocks at idle; lowest power"],
+          [2, "IOPerformance", "Favor PCIe/IO bandwidth"],
+          [3, "BalancedMemoryPerformance", "Balance toward memory bandwidth"],
+          [4, "BalancedCorePerformance", "Balance toward core boost"],
+          [5, "BalancedCoreMemoryPerformance", "Balance core and memory"],
+        ];
+        // Current mode: read straight from the node when the panel opens (and
+        // after each change), so it shows even before the worker reports it.
+        const [liveEff, setLiveEff] = useState(null);  // [{socket, mode, name}]
+        const effModes = liveEff || node.cpuEffModes || [];
+        const effCurrent = effModes.length > 0 && effModes.every(m => m.mode === effModes[0].mode) ? effModes[0].mode : null;
+        const [selectedEff, setSelectedEff] = useState(effCurrent ?? 0);
+        const effSockets = (node.cpuEffModes && node.cpuEffModes.length > 0)
+          ? node.cpuEffModes.map(m => m.socket) : [0, 1];
+
+        const effReadCmd = effSockets.map(sk =>
+          `e_smi_tool --showcurrpwrefficiencymode ${sk} | awk -F'|' -v s=${sk} ` +
+          `'/PowerEfficiencyMode[[:space:]]*\\|/{gsub(/[[:space:]]/,"",$3); m=$3} /ModeName/{gsub(/[[:space:]]/,"",$3); print "socket" s "=" m ":" $3}'`
+        ).join("\n");
+
+        function parseEff(text) {
+          const out = [];
+          for (const line of (text || "").split("\n")) {
+            const mt = line.trim().match(/^socket(\d+)=(\d+):(\w+)$/);
+            if (mt) out.push({ socket: +mt[1], mode: +mt[2], name: mt[3] });
+          }
+          return out.length > 0 ? out : null;
+        }
+
+        async function loadEff() {
+          if (!token) return;
+          try {
+            const r = await fetch(`/api/node/${encodeURIComponent(nodeId)}/exec`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-Exec-Token": token },
+              body: JSON.stringify({ cmd: effReadCmd, timeout_s: 15 }),
+            });
+            const body = await r.json().catch(() => null);
+            const modes = body && parseEff(body.stdout);
+            if (modes) {
+              setLiveEff(modes);
+              if (modes.every(m => m.mode === modes[0].mode)) setSelectedEff(modes[0].mode);
+            }
+          } catch {}
+        }
+        useEffect(() => { loadEff(); }, [token]);
+
+        function applyEffMode() {
+          const mode = parseInt(selectedEff, 10);
+          if (!Number.isInteger(mode) || mode < 0 || mode > 5) return;
+          const sockets = effModes.length > 0 ? effModes.map(m => m.socket) : [0, 1];
+          const cmd =
+            `set -e\n` +
+            sockets.map(sk => `e_smi_tool --setpowerefficiencymode ${sk} ${mode} >/dev/null`).join("\n") + "\n" +
+            effReadCmd;
+          runExec(cmd).then(() => {
+            setResult(prev => {
+              if (!prev || prev.tone !== "ok") return prev;
+              const modes = parseEff(prev.text);
+              if (modes) setLiveEff(modes);
+              const shown = modes ? modes.map(m => `S${m.socket} ${m.name}`).join(", ") : EFF_MODES[mode][1];
+              return { tone: "ok", text: `power efficiency mode set: ${shown}` };
+            });
+          });
+        }
+
         function applyGovernor() {
           if (!selectedGov) return;
           if (!/^[a-z_]+$/.test(selectedGov)) return;
@@ -722,7 +792,7 @@
           <div className="nd-modal-bg" onClick={e => e.target === e.currentTarget && onClose()}>
             <div className="nd-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 620, height: "auto" }}>
               <div className="nd-modal-head">
-                <span className="nd-modal-title">CPU Frequency · {nodeId}</span>
+                <span className="nd-modal-title">CPU Tuning · {nodeId}</span>
                 <span className="nd-modal-warn">⚠ Clamps all cores · root</span>
                 <button className="nd-modal-close" onClick={onClose} title="Close (Esc)">×</button>
               </div>
@@ -769,6 +839,31 @@
                       ))}
                     </select>
                     <button className="nd-freq-btn" onClick={applyGovernor} disabled={!token || busy || !selectedGov}>Set governor</button>
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 }}>
+                    Power efficiency mode (HSMP)
+                  </div>
+                  <div style={{ fontSize: 12, fontFamily: "var(--mono)", color: "var(--ink)", marginBottom: 6 }}>
+                    Current:{" "}
+                    <b>
+                      {effModes.length === 0
+                        ? (token ? "reading…" : "set token to read")
+                        : effCurrent !== null
+                          ? `${effModes[0].name || effCurrent} (all sockets)`
+                          : effModes.map(m => `S${m.socket} ${m.name || m.mode}`).join(" · ")}
+                    </b>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <select value={selectedEff} onChange={e => setSelectedEff(e.target.value)}
+                      style={{ flex: 1, padding: "6px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface-2)", color: "var(--ink)", fontFamily: "var(--mono)", fontSize: 12 }}>
+                      {EFF_MODES.map(([v, name, desc]) => (
+                        <option key={v} value={v} title={desc}>{v} · {name}{v === effCurrent ? " (current)" : ""}</option>
+                      ))}
+                    </select>
+                    <button className="nd-freq-btn" onClick={applyEffMode} disabled={!token || busy}>Set mode</button>
                   </div>
                 </div>
 
@@ -924,6 +1019,8 @@
                               : (totalGuess > 0 ? Array.from({ length: totalGuess }, (_, i) => i) : []);
         const onlineCount = desired ? Object.values(desired).filter(v => v === 1).length : 0;
         const totalCount = cores.length;
+        // Big nodes (512-768 logical CPUs here) get smaller chips.
+        const dense = totalCount > 128;
 
         const diffs = [];
         if (desired && hostState) {
@@ -1004,10 +1101,11 @@
               title={locked ? "cpu0 cannot be offlined" : `cpu${n} · click to toggle`}
               style={{
                 fontFamily: "var(--mono)",
-                fontSize: 11,
-                padding: "5px 7px",
-                minWidth: 38,
-                borderRadius: 5,
+                fontSize: dense ? 10 : 11,
+                padding: dense ? "3px 0" : "5px 0",
+                minWidth: 0,
+                textAlign: "center",
+                borderRadius: dense ? 4 : 5,
                 border: `1px solid ${changed ? "var(--accent)" : "var(--line)"}`,
                 background: isOn
                   ? (changed ? "color-mix(in oklab, var(--ok) 30%, var(--surface-2))" : "color-mix(in oklab, var(--ok) 18%, var(--surface-2))")
@@ -1031,7 +1129,7 @@
                 <button className="nd-modal-close" onClick={onClose} title="Close (Esc)">×</button>
               </div>
 
-              <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
+              <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 14, overflowY: "auto", minHeight: 0, flex: 1 }}>
                 <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>
                   {totalCount > 0
                     ? <>Online <b style={{ color: "var(--ink)" }}>{onlineCount}</b> / {totalCount}{diffs.length > 0 && <> · <b style={{ color: "var(--accent)" }}>{diffs.length} pending</b></>}</>
@@ -1062,7 +1160,16 @@
                              : "set token to load core states"}
                     </div>
                   ) : (
-                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                    // A fixed-size, scrolling grid: 768 cores would otherwise
+                    // push the presets and the Apply button off the screen.
+                    <div style={{
+                      display: "grid",
+                      gridTemplateColumns: `repeat(auto-fill, minmax(${dense ? 30 : 38}px, 1fr))`,
+                      gap: dense ? 3 : 4,
+                      maxHeight: "min(42vh, 380px)",
+                      overflowY: "auto",
+                      paddingRight: 4,
+                    }}>
                       {cores.map(chipCore)}
                     </div>
                   )}
@@ -1170,6 +1277,344 @@
         try { return JSON.parse(line.slice(7)); } catch { return null; }
       }
 
+      // PCIe Tuning: ASPM L1 on PCIe switch uplinks (root port <-> switch).
+      // Proven on scc04: ~41 W off with all four uplinks in L1. Under the
+      // kernel's "default" policy a per-link `l1_aspm` write can only force a
+      // link OFF, so enabling goes: pin the unwanted links off, switch the
+      // policy to powersave, then clear the pin on the wanted ones.
+      const PCIE_PROBE = [
+        `P=/sys/module/pcie_aspm/parameters/policy`,
+        `echo "POLICY $(awk -F'[][]' '{print $2}' $P)"`,
+        `for d in /sys/bus/pci/devices/*; do`,
+        `  [ -e "$d/link/l1_aspm" ] || continue`,
+        `  case "$(cat $d/class)" in 0x0604*) ;; *) continue;; esac`,
+        `  ls -d $d/0000:* >/dev/null 2>&1 || continue`,
+        `  gpu=0; ib=0; eth=0; nvme=0; other=0; empty=0`,
+        `  for dsp in $d/0000:*; do`,
+        `    [ -d "$dsp" ] || continue; n=0`,
+        `    for ep in $dsp/0000:*; do`,
+        `      [ -e "$ep/class" ] || continue; n=$((n+1)); c=$(cat $ep/class); v=$(cat $ep/vendor)`,
+        `      case "$c" in 0x0302*|0x0300*) gpu=$((gpu+1));; 0x0207*) ib=$((ib+1));; 0x0200*) eth=$((eth+1));;`,
+        `        0x0108*) nvme=$((nvme+1));; 0x0880*|0x0107*) if [ "$v" = 0x1000 ]; then n=$((n-1)); else other=$((other+1)); fi;;`,
+        `        *) other=$((other+1));; esac`,
+        `    done`,
+        `    [ $n -eq 0 ] && empty=$((empty+1))`,
+        `  done`,
+        `  echo "SW $(basename $d) $(cat $d/link/l1_aspm) gpu=$gpu ib=$ib eth=$eth nvme=$nvme other=$other empty=$empty"`,
+        `done`,
+        `on=0; for f in /sys/bus/pci/devices/*/link/*aspm; do [ "$(cat $f)" = 1 ] && on=$((on+1)); done; echo "ASPMON $on"`,
+        // Network cards without ASPM (ConnectX-7): their link never leaves L0,
+        // so its speed is the only lever. One line per card (function .0).
+        `for ep in /sys/bus/pci/devices/*.0; do`,
+        `  case "$(cat $ep/class)" in 0x0207*|0x0200*) ;; *) continue;; esac`,
+        `  [ -e "$ep/link/l1_aspm" ] && continue`,
+        `  pd=$(dirname $(readlink -f $ep)); port=$(basename $pd)`,
+        `  case "$port" in 0000:*) ;; *) continue;; esac`,
+        `  s=$(setpci -s $port CAP_EXP+12.w 2>/dev/null) || continue`,
+        `  pc=$(setpci -s $port CAP_EXP+0c.l 2>/dev/null); ec=$(setpci -s $(basename $ep) CAP_EXP+0c.l 2>/dev/null)`,
+        `  mx=$((0x$pc & 0xf)); [ $((0x$ec & 0xf)) -lt $mx ] && mx=$((0x$ec & 0xf)); [ $mx -ge 3 ] || continue`,
+        `  gpu=0; sw=$(dirname $pd); case "$(basename $sw)" in 0000:*) gpu=$(find $sw -name class | xargs grep -lE '^0x030[02]' | wc -l);; esac`,
+        `  ia=0; it=0; for f in ${"${ep%.0}"}.*; do for p in $f/infiniband/*/ports/*/state; do [ -e "$p" ] || continue; it=$((it+1)); grep -q ACTIVE $p && ia=$((ia+1)); done; done`,
+        `  echo "NL $port $(basename $ep) cur=$((0x$s & 0xf)) w=$(((0x$s >> 4) & 0x3f)) up=$(((0x$s >> 13) & 1)) max=$mx gpu=$gpu ia=$ia it=$it"`,
+        `done`,
+      ].join("\n");
+      // Retrain one network link to a target gen and verify; if it does not
+      // come back, escalate: retrain again, link disable/enable, then rescan
+      // (drill-tested recovery path, cx7_recover.sh). Prints "RT <port> <result>".
+      const RETRAIN_FN = [
+        `rt() { port=$1; card=$2; g=$3`,
+        `  ok() { s=$(setpci -s $port CAP_EXP+12.w 2>/dev/null) || return 1; [ -e /sys/bus/pci/devices/$card ] && [ $(((0x$s >> 13) & 1)) = 1 ] && [ $((0x$s & 0xf)) = $g ]; }`,
+        `  go() { setpci -s $port CAP_EXP+30.w=000$g:000f; setpci -s $port CAP_EXP+10.w=0020:0020; }`,
+        `  w() { for i in $(seq $1); do sleep 0.5; ok && return 0; done; return 1; }`,
+        `  go; w 10 && { echo "RT $port ok"; return; }`,
+        `  go; w 10 && { echo "RT $port ok-after-2nd-retrain"; return; }`,
+        `  setpci -s $port CAP_EXP+10.w=0010:0010; sleep 1; setpci -s $port CAP_EXP+10.w=0000:0010; sleep 2; go`,
+        `  w 10 && { echo "RT $port ok-after-link-reset"; return; }`,
+        `  [ -e /sys/bus/pci/devices/$card ] || { echo 1 > /sys/bus/pci/rescan; sleep 5; go; w 20 && { echo "RT $port ok-after-rescan"; return; }; }`,
+        `  s=$(setpci -s $port CAP_EXP+12.w); echo "RT $port FAIL gen=$((0x$s & 0xf)) up=$(((0x$s >> 13) & 1))"`,
+        `}`,
+      ].join("\n");
+      // Approx. usable PCIe bandwidth of an x16 link per gen, for the UI.
+      const GEN_GBPS = { 1: 32, 2: 64, 3: 126, 4: 252, 5: 504 };
+      const BDF_RE = /^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$/;
+      // default = keep BIOS settings, performance = ASPM off everywhere,
+      // powersave = L0s/L1, powersupersave = also L1 substates. Per-link L1
+      // choices only take effect under the two power policies.
+      const ASPM_POLICIES = ["default", "performance", "powersave", "powersupersave"];
+      const POWER_POLICY = p => p === "powersave" || p === "powersupersave";
+
+      function parsePcie(text) {
+        const out = { policy: null, switches: [], aspmOn: null, links: [], retrain: [] };
+        for (const line of (text || "").split("\n")) {
+          const t = line.trim().split(/\s+/);
+          if (t[0] === "POLICY") out.policy = t[1] || null;
+          else if (t[0] === "ASPMON") out.aspmOn = +t[1];
+          else if (t[0] === "SW" && BDF_RE.test(t[1])) {
+            const kv = Object.fromEntries(t.slice(3).map(x => x.split("=")).map(([k, v]) => [k, +v]));
+            out.switches.push({ bdf: t[1], l1: t[2] === "1", ...kv });
+          } else if (t[0] === "NL" && BDF_RE.test(t[1]) && BDF_RE.test(t[2])) {
+            const kv = Object.fromEntries(t.slice(3).map(x => x.split("=")).map(([k, v]) => [k, +v]));
+            out.links.push({ port: t[1], card: t[2], ...kv });
+          } else if (t[0] === "RT" && BDF_RE.test(t[1])) {
+            out.retrain.push({ port: t[1], result: t.slice(2).join(" ") });
+          }
+        }
+        return out.policy ? out : null;
+      }
+
+      function PcieModal({ nodeId, onClose }) {
+        const [token, setToken] = useState(() => sessionStorage.getItem("cockpit_exec_token") || "");
+        const [tokenDraft, setTokenDraft] = useState("");
+        const [editingToken, setEditingToken] = useState(() => !sessionStorage.getItem("cockpit_exec_token"));
+        const [state, setState] = useState(null);
+        const [want, setWant] = useState({});        // bdf -> bool
+        const [wantPolicy, setWantPolicy] = useState("");
+        const [wantGen, setWantGen] = useState({});  // port bdf -> target gen
+        const [busy, setBusy] = useState(false);
+        const [result, setResult] = useState(null);
+
+        useEffect(() => {
+          const onKey = (e) => { if (e.key === "Escape") onClose(); };
+          window.addEventListener("keydown", onKey);
+          return () => window.removeEventListener("keydown", onKey);
+        }, [onClose]);
+
+        function saveToken() {
+          const t = tokenDraft.trim();
+          if (!t) return;
+          sessionStorage.setItem("cockpit_exec_token", t);
+          setToken(t); setTokenDraft(""); setEditingToken(false);
+        }
+
+        async function run(cmd, okText, timeoutS = 20) {
+          if (!token || busy) return;
+          setBusy(true);
+          try {
+            const r = await fetch(`/api/node/${encodeURIComponent(nodeId)}/exec`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-Exec-Token": token },
+              body: JSON.stringify({ cmd, timeout_s: timeoutS }),
+            });
+            const body = await r.json().catch(() => null);
+            if (!r.ok || !body) { setResult({ tone: "bad", text: (body && body.error) || `HTTP ${r.status}` }); return; }
+            if (typeof body.exit === "number" && body.exit !== 0) {
+              setResult({ tone: "bad", text: `exit=${body.exit} ${(body.stderr || "").trim()}` }); return;
+            }
+            const st = parsePcie(body.stdout);
+            if (!st) { setResult({ tone: "bad", text: "no PCIe data from node" }); return; }
+            setState(st);
+            setWant(Object.fromEntries(st.switches.map(sw => [sw.bdf, sw.l1])));
+            setWantPolicy(st.policy);
+            setWantGen(Object.fromEntries(st.links.map(l => [l.port, l.cur])));
+            if (okText) setResult({ tone: "ok", text: okText(st) });
+          } catch (err) {
+            setResult({ tone: "bad", text: String(err && err.message || err) });
+          } finally {
+            setBusy(false);
+          }
+        }
+
+        useEffect(() => { if (token) run(PCIE_PROBE); }, [token]);
+
+        const switches = state ? state.switches : [];
+        const onList = switches.filter(sw => want[sw.bdf]).map(sw => sw.bdf);
+        const offList = switches.filter(sw => !want[sw.bdf]).map(sw => sw.bdf);
+        const perLink = POWER_POLICY(wantPolicy);
+        const links = state ? state.links : [];
+        const genChanges = links.filter(l => wantGen[l.port] && wantGen[l.port] !== l.cur);
+        const aspmChanged = (state && wantPolicy !== state.policy) || (perLink && switches.some(sw => !!want[sw.bdf] !== sw.l1));
+        const changed = aspmChanged || genChanges.length > 0;
+        const slowGpuLink = links.some(l => l.gpu > 0 && (wantGen[l.port] || l.cur) < l.max);
+        const slowLink = links.some(l => (wantGen[l.port] || l.cur) < l.max);
+        const gpuPicked = perLink && switches.some(sw => want[sw.bdf] && sw.gpu > 0);
+        const ibPicked = perLink && switches.some(sw => want[sw.bdf] && (sw.ib > 0 || sw.eth > 0));
+        const summarize = st => `policy ${st.policy} · L1 on ${st.switches.filter(x => x.l1).length}/${st.switches.length} uplinks`;
+
+        function apply() {
+          if (![...onList, ...offList].every(b => BDF_RE.test(b))) return;
+          if (!ASPM_POLICIES.includes(wantPolicy)) return;
+          if (!genChanges.every(l => BDF_RE.test(l.port) && BDF_RE.test(l.card) && Number.isInteger(wantGen[l.port])
+                                     && wantGen[l.port] >= 1 && wantGen[l.port] <= l.max)) return;
+          const dev = b => `/sys/bus/pci/devices/${b}/link/l1_aspm`;
+          const setPolicy = `echo ${wantPolicy} > /sys/module/pcie_aspm/parameters/policy`;
+          const aspmCmd = !aspmChanged ? []
+            : !perLink ? [setPolicy]
+            : [...offList.map(b => `echo 0 > ${dev(b)}`), setPolicy, ...onList.map(b => `echo 1 > ${dev(b)}`)];
+          const genCmd = genChanges.length ? [RETRAIN_FN, ...genChanges.map(l => `rt ${l.port} ${l.card} ${wantGen[l.port]}`)] : [];
+          const cmd = [`set -e`, ...aspmCmd, `set +e`, ...genCmd, PCIE_PROBE].join("\n");
+          const requested = aspmChanged && perLink ? [...onList] : [];
+          run(cmd, st => {
+            // The kernel can keep a link out of L1 even after the write: it
+            // drops L1 when the exit latency exceeds what a device below the
+            // switch (e.g. a GPU) declares acceptable. Say so instead of
+            // reporting success.
+            const refused = requested.filter(b => !(st.switches.find(x => x.bdf === b) || {}).l1);
+            const parts = [summarize(st)];
+            if (refused.length) parts.push(`kernel kept L1 off on ${refused.map(b => b.slice(5)).join(", ")} (devices below reject the L1 exit latency)`);
+            for (const r of st.retrain) {
+              const l = st.links.find(x => x.port === r.port);
+              parts.push(`${r.port.slice(5)} → ${l ? `Gen${l.cur} x${l.w}` : "?"} ${r.result}`);
+            }
+            return parts.join("\n");
+          }, genChanges.length ? 120 : 20);
+        }
+        function restore() {
+          const slow = links.filter(l => l.cur < l.max && BDF_RE.test(l.port) && BDF_RE.test(l.card));
+          const cmd = [`set -e`, `echo default > /sys/module/pcie_aspm/parameters/policy`, `set +e`,
+                       ...(slow.length ? [RETRAIN_FN, ...slow.map(l => `rt ${l.port} ${l.card} ${l.max}`)] : []),
+                       PCIE_PROBE].join("\n");
+          run(cmd, st => [`restored: ${summarize(st)}`,
+                          ...st.retrain.map(r => `${r.port.slice(5)} → max speed ${r.result}`)].join("\n"),
+              slow.length ? 120 : 20);
+        }
+
+        const behind = sw => {
+          const parts = [];
+          if (sw.gpu) parts.push(`GPU×${sw.gpu}`);
+          if (sw.ib) parts.push(`IB×${sw.ib}`);
+          if (sw.eth) parts.push(`ETH×${sw.eth}`);
+          if (sw.nvme) parts.push(`NVMe×${sw.nvme}`);
+          if (sw.other) parts.push(`other×${sw.other}`);
+          return parts.length ? parts.join(" ") : "nothing (empty slots)";
+        };
+        const lineNote = (tone) => ({ fontSize: 11, padding: "5px 8px", borderRadius: 6, color: `var(--${tone})`, fontWeight: 600,
+          background: `color-mix(in oklab, var(--${tone}) 10%, var(--surface-2))` });
+
+        return (
+          <div className="nd-modal-bg" onClick={e => e.target === e.currentTarget && onClose()}>
+            <div className="nd-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 560, height: "auto" }}>
+              <div className="nd-modal-head">
+                <span className="nd-modal-title">PCIe Tuning · {nodeId}</span>
+                <span className="nd-modal-warn">⚠ ASPM · link speed · root</span>
+                <button className="nd-modal-close" onClick={onClose} title="Close (Esc)">×</button>
+              </div>
+
+              <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 12, overflowY: "auto", minHeight: 0, flex: 1 }}>
+                {editingToken ? (
+                  <div className="nd-shell-tokenrow" style={{ margin: 0 }}>
+                    <span className="lbl">Token</span>
+                    <input type="password" value={tokenDraft} onChange={e => setTokenDraft(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && saveToken()}
+                      placeholder="exec_token from worker.conf" autoFocus />
+                    <button onClick={saveToken} disabled={!tokenDraft.trim()}>Save</button>
+                  </div>
+                ) : (
+                  <div className="nd-shell-tokenrow" style={{ margin: 0 }}>
+                    <span className="lbl">Token</span>
+                    <span style={{ flex: 1, fontFamily: "var(--mono)", fontSize: 12, color: "var(--muted)" }}>•••••••• (session)</span>
+                    <span className="change" onClick={() => { setEditingToken(true); setTokenDraft(""); }}>[change]</span>
+                  </div>
+                )}
+
+                <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+                  {state
+                    ? <>ASPM policy <b style={{ color: "var(--ink)" }}>{state.policy}</b> · {state.aspmOn} link states on</>
+                    : (token ? (busy ? "reading…" : "—") : "set token to read")}
+                </div>
+
+                {state && (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <span style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, width: 60 }}>Policy</span>
+                    <select value={wantPolicy} onChange={e => setWantPolicy(e.target.value)}
+                      style={{ flex: 1, padding: "6px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface-2)", color: "var(--ink)", fontFamily: "var(--mono)", fontSize: 12 }}>
+                      {ASPM_POLICIES.map(p => <option key={p} value={p}>{p}{p === state.policy ? " (current)" : ""}</option>)}
+                    </select>
+                  </div>
+                )}
+
+                {switches.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, opacity: perLink ? 1 : 0.5 }}>
+                    <div style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>
+                      Switch uplinks · L1
+                    </div>
+                    {switches.map(sw => (
+                      <label key={sw.bdf} style={{ display: "flex", gap: 10, alignItems: "center", fontSize: 12, fontFamily: "var(--mono)",
+                        padding: "6px 8px", borderRadius: 6, background: "var(--surface-2)", cursor: "pointer" }}>
+                        <input type="checkbox" checked={!!want[sw.bdf]} disabled={!perLink}
+                          onChange={e => setWant(w => ({ ...w, [sw.bdf]: e.target.checked }))} />
+                        <span style={{ width: 96 }}>{sw.bdf.slice(5)}</span>
+                        <span style={{ flex: 1, color: sw.gpu ? "var(--warn)" : "var(--ink)" }}>{behind(sw)}</span>
+                        <span style={{ color: sw.l1 ? "var(--ok)" : "var(--muted)", fontWeight: 700 }}>{sw.l1 ? "L1" : "off"}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+                {state && switches.length === 0 && <div style={lineNote("warn")}>No ASPM-capable switch uplinks on this node.</div>}
+                {state && switches.length > 0 && !perLink && (
+                  <div style={{ fontSize: 11, color: "var(--muted)" }}>
+                    {wantPolicy === "performance" ? "ASPM off on every link." : "BIOS settings on every link."} Per-link L1 needs powersave.
+                  </div>
+                )}
+                {wantPolicy === "powersupersave" && <div style={lineNote("warn")}>Also enables L1 substates where supported.</div>}
+
+                {links.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ flex: 1, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700 }}>
+                        Network cards · PCIe speed (no ASPM)
+                      </span>
+                      <button className="nd-freq-btn" disabled={busy} style={{ padding: "2px 8px", fontSize: 11 }}
+                        onClick={() => setWantGen(Object.fromEntries(links.map(l => [l.port, Math.min(2, l.max)])))}
+                        title="Gen2 at idle: about −25 W measured on scc04 (PSU output), IB ports stay up">Idle · Gen2</button>
+                      <button className="nd-freq-btn" disabled={busy} style={{ padding: "2px 8px", fontSize: 11 }}
+                        onClick={() => setWantGen(Object.fromEntries(links.map(l => [l.port, l.max])))}
+                        title="Full speed before jobs">Run · max</button>
+                    </div>
+                    {links.map(l => (
+                      <div key={l.port} style={{ display: "flex", gap: 10, alignItems: "center", fontSize: 12, fontFamily: "var(--mono)",
+                        padding: "6px 8px", borderRadius: 6, background: "var(--surface-2)" }}>
+                        <span style={{ width: 96 }}>{l.card.slice(5)}</span>
+                        <span style={{ flex: 1, color: l.gpu ? "var(--warn)" : "var(--ink)" }}>
+                          IB {l.ia}/{l.it} active{l.gpu ? ` · GPU×${l.gpu} on switch` : ""}
+                        </span>
+                        <span style={{ color: !l.up ? "var(--crit)" : l.cur < l.max ? "var(--ok)" : "var(--muted)", fontWeight: 700 }}>
+                          {l.up ? `Gen${l.cur} x${l.w}` : "DOWN"}
+                        </span>
+                        <select value={wantGen[l.port] || l.cur} disabled={busy}
+                          onChange={e => setWantGen(g => ({ ...g, [l.port]: +e.target.value }))}
+                          style={{ padding: "3px 6px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface)", color: "var(--ink)", fontFamily: "var(--mono)", fontSize: 12 }}>
+                          {Array.from({ length: l.max }, (_, i) => l.max - i).map(g =>
+                            <option key={g} value={g}>Gen{g}{g === l.max ? " (max)" : ""}</option>)}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {slowGpuLink && <div style={lineNote("crit")}>Card on a GPU switch below max: NCCL/GPUDirect throughput collapses. Run · max before jobs.</div>}
+                {!slowGpuLink && slowLink && (
+                  <div style={lineNote("warn")}>
+                    PCIe below max: ~{GEN_GBPS[Math.min(...links.map(l => wantGen[l.port] || l.cur))]} Gb/s per card. Run · max before jobs.
+                  </div>
+                )}
+
+                {gpuPicked && <div style={lineNote("crit")}>GPU links: wake-up latency on GPU transfers.</div>}
+                {!gpuPicked && ibPicked && <div style={lineNote("warn")}>Network links: µs wake-up latency on IB.</div>}
+
+                {result && (
+                  <div style={{ fontFamily: "var(--mono)", fontSize: 12, padding: "6px 10px", borderRadius: 6,
+                    background: result.tone === "bad" ? "color-mix(in oklab, var(--crit) 12%, var(--surface-2))"
+                              : "color-mix(in oklab, var(--ok) 10%, var(--surface-2))",
+                    color: result.tone === "bad" ? "var(--crit)" : "var(--ink)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    {result.text}
+                  </div>
+                )}
+
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--line)", paddingTop: 8 }}>
+                  <span onClick={!token || busy ? undefined : restore}
+                    style={{ fontSize: 11, color: !token || busy ? "var(--muted)" : "var(--accent)", cursor: !token || busy ? "default" : "pointer", textDecoration: "underline", textDecorationStyle: "dotted" }}>
+                    Restore default
+                  </span>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button className="nd-freq-btn" disabled={!token || busy} onClick={() => run(PCIE_PROBE)} title="Re-read">↻</button>
+                    <button className="nd-freq-btn" disabled={!token || busy || !changed} onClick={apply}>{busy ? "running…" : "Apply"}</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
       function FanModal({ nodeId, node, onClose }) {
         const [token, setToken] = useState(() => sessionStorage.getItem("cockpit_exec_token") || "");
         const [tokenDraft, setTokenDraft] = useState("");
@@ -1191,6 +1636,11 @@
         const [baseProfile, setBaseProfile] = useState("");
         const [kind, setKind] = useState("floor");
         const [customPct, setCustomPct] = useState("");
+        // per fan group manual duty (SYS / REAR / EXT / CPU); "" = keep profile
+        const [perGroup, setPerGroup] = useState(false);
+        const [groupPct, setGroupPct] = useState({});
+        const [fanGroups, setFanGroups] = useState(null);   // {"SYS": 24, ...} from the BMC
+        const [tab, setTab] = useState("profile");          // "profile" | "manual"
 
         const vendor = node.fanVendor || "unknown";
         // Worker vendor detection runs at start-up and can miss a slow BMC,
@@ -1247,6 +1697,7 @@
 
         function applyProfileState(res) {
           if (!res || !res.profiles) return;
+          if (res.fan_groups && Object.keys(res.fan_groups).length) setFanGroups(res.fan_groups);
           setProfiles(res.profiles);
           setActiveProfile(res.mode);
           const real = res.profiles.filter(p => p !== MANUAL_PROFILE);
@@ -1309,50 +1760,82 @@
         const minPct = profileApi ? 0 : 1;
         const pctValid = Number.isFinite(pctVal) && pctVal >= minPct && pctVal <= 100;
         const presets = profileApi ? [0, 10, 20, 30, 40, 50, 60, 80, 100] : [20, 40, 60, 80, 100];
+        // Fan groups: from the BMC once status has run, else from the worker's fan names.
+        const GROUP_ORDER = ["SYS", "REAR", "EXT", "CPU"];
+        const groupNames = Object.keys(fanGroups || node.perFan.reduce((a, f) => {
+          if (f.bank) a[f.bank.toUpperCase()] = 1; return a; }, {}))
+          .sort((a, b) => (GROUP_ORDER.indexOf(a) + 1 || 99) - (GROUP_ORDER.indexOf(b) + 1 || 99) || a.localeCompare(b));
+        const groupNow = (g) => {   // current estimated duty of a group, from live rpm
+          const v = node.perFan.filter(f => (f.bank || "").toUpperCase() === g && f.pct != null).map(f => f.pct);
+          return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null;
+        };
+        const groupVals = {};
+        let groupBad = false;
+        for (const g of groupNames) {
+          const raw = (groupPct[g] ?? "").toString().trim();
+          if (raw === "") { groupVals[g] = null; continue; }
+          const v = parseInt(raw, 10);
+          if (!Number.isFinite(v) || v < minPct || v > 100) groupBad = true;
+          groupVals[g] = v;
+        }
+        const groupSet = Object.values(groupVals).filter(v => v != null);
+        const groupsValid = !groupBad && groupSet.length > 0;
+        const lowestPct = perGroup ? (groupSet.length ? Math.min(...groupSet) : null) : (pctValid ? pctVal : null);
         const vendorLabel = profileApi && vendor === "unknown" ? "Gigabyte/AMI (BMC probe)"
                           : vendor === "unknown" ? "unknown" : vendor.charAt(0).toUpperCase() + vendor.slice(1);
         const realProfiles = (profiles || []).filter(p => p !== MANUAL_PROFILE);
         const canAct = supported && token && bmcReady && !busy;
+        // Why an Apply button is grey, shown next to it instead of leaving the user guessing.
+        const blockedReason = (valueOk, valueMsg) =>
+          !supported ? "fan control not supported here"
+          : !token ? "enter the exec token above"
+          : !bmcReady ? (node.bmcHost ? "enter the BMC login above" : "BMC IP not reported yet")
+          : busy ? "running…"
+          : (profileApi && !baseProfile) ? "profile list not loaded: press ↻"
+          : !valueOk ? valueMsg : "";
+        const groupBlocked = blockedReason(groupsValid,
+          groupBad ? "each value must be 0–100" : "enter a duty for at least one group");
+        const allBlocked = blockedReason(pctValid, `enter a duty ${minPct}–100`);
 
         const inputStyle = { flex: 1, padding: "6px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface-2)", color: "var(--ink)", fontFamily: "var(--mono)", fontSize: 13 };
-        const sectionLbl = { fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontWeight: 700, marginBottom: 6 };
-        const notice = (tone) => ({ fontSize: 12, padding: "10px 12px", borderRadius: 6, lineHeight: 1.5, color: "var(--ink)",
-          background: `color-mix(in oklab, var(--${tone}) 12%, var(--surface-2))`,
-          border: `1px solid color-mix(in oklab, var(--${tone}) 40%, var(--line))` });
+        const lineNote = (tone) => ({ fontSize: 11, padding: "5px 8px", borderRadius: 6, color: `var(--${tone})`, fontWeight: 600,
+          background: `color-mix(in oklab, var(--${tone}) 10%, var(--surface-2))` });
+        // Segmented control: one row of mutually exclusive choices.
+        // `full` stretches the buttons across the row (the tab bar); otherwise
+        // the control is only as wide as its buttons.
+        const Seg = ({ value, options, onChange, full }) => (
+          <div style={{ display: "flex", alignSelf: full ? "stretch" : "flex-start", border: "1px solid var(--line)", borderRadius: 7, overflow: "hidden" }}>
+            {options.map(([v, lbl, tip]) => (
+              <button key={String(v)} onClick={() => onChange(v)} title={tip}
+                style={{ flex: full ? 1 : "0 0 auto", padding: "5px 12px", border: "none", cursor: "pointer", fontFamily: "var(--font)", fontSize: 12, fontWeight: 700,
+                  background: value === v ? "var(--accent)" : "var(--surface-2)", color: value === v ? "#fff" : "var(--ink)" }}>{lbl}</button>
+            ))}
+          </div>
+        );
+        const shortPresets = profileApi ? [20, 30, 40, 60, 80, 100] : presets;
 
         return (
           <div className="nd-modal-bg" onClick={e => e.target === e.currentTarget && onClose()}>
-            <div className="nd-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 620, height: "auto" }}>
+            <div className="nd-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 560, height: "auto" }}>
               <div className="nd-modal-head">
                 <span className="nd-modal-title">Fan Control · {nodeId}</span>
-                <span className="nd-modal-warn">⚠ Changes BMC fan policy · root</span>
+                <span className="nd-modal-warn">⚠ BMC · root</span>
                 <button className="nd-modal-close" onClick={onClose} title="Close (Esc)">×</button>
               </div>
 
-              <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
+              <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 12, overflowY: "auto", minHeight: 0, flex: 1 }}>
+                {/* Status */}
                 <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>
                   {node.fanTotal > 0
-                    ? <>Fans <b style={{ color: "var(--ink)" }}>{node.fanOk}/{node.fanTotal} OK</b>
-                        {node.fanRpm > 0 && <> · avg <b style={{ color: "var(--ink)" }}>{(node.fanRpm / 1000).toFixed(2)} kRPM</b></>}
-                        {" "}· vendor <b style={{ color: "var(--ink)" }}>{vendorLabel}</b>
-                        {profileApi && activeProfile && <> · profile <b style={{ color: activeProfile === MANUAL_PROFILE ? "var(--warn)" : "var(--ink)" }}>{activeProfile}</b></>}
+                    ? <><b style={{ color: "var(--ink)" }}>{node.fanOk}/{node.fanTotal}</b> OK
+                        {node.fanRpm > 0 && <> · <b style={{ color: "var(--ink)" }}>{(node.fanRpm / 1000).toFixed(1)}k rpm{node.fanPct != null && ` (${Math.round(node.fanPct)}%)`}</b></>}
+                        {profileApi && activeProfile && <> · <b style={{ color: activeProfile === MANUAL_PROFILE ? "var(--warn)" : "var(--ink)" }}>{activeProfile}</b></>}
                       </>
-                    : <em>fan data unavailable on this node</em>}
+                    : <em>no fan data</em>}
                 </div>
 
-                {!supported && (
-                  <div style={notice("warn")}>
-                    <div style={{ fontWeight: 700, marginBottom: 4, color: "var(--warn)" }}>Fan tuning is not supported on this platform.</div>
-                    Detected vendor: <b>{vendorLabel}</b>, and no BMC address was reported. Gigabyte/AMI boards use the BMC fan-profile API; <code>FAN_CMDS</code> in <code>server/web/node.html</code> covers Supermicro and Dell.
-                  </div>
-                )}
-
-                {profileApi && !node.bmcHost && (
-                  <div style={notice("warn")}>
-                    <div style={{ fontWeight: 700, marginBottom: 4, color: "var(--warn)" }}>BMC IP not yet discovered.</div>
-                    The worker hasn't reported a BMC management IP for this node. Check that <code>ipmitool lan print 1</code> returns a valid address as root, then restart <code>hpc-worker</code>.
-                  </div>
-                )}
+                {!supported && <div style={lineNote("warn")}>Fan control not supported on this node ({vendorLabel}).</div>}
+                {profileApi && !node.bmcHost && <div style={lineNote("warn")}>BMC IP not reported yet by the worker.</div>}
 
                 {editingToken ? (
                   <div className="nd-shell-tokenrow" style={{ margin: 0 }}>
@@ -1388,9 +1871,10 @@
                   </div>
                 ))}
 
-                {profileApi && (
-                  <div>
-                    <div style={sectionLbl}>Fan profile</div>
+                {supported && (<>
+                  <Seg full value={tab} onChange={setTab} options={[["profile", "Profile"], ["manual", "Manual"]]} />
+
+                  {tab === "profile" && (profileApi ? (
                     <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                       <select value={pickProfile} onChange={e => setPickProfile(e.target.value)} disabled={!profiles}
                         style={{ ...inputStyle, fontSize: 12 }}>
@@ -1402,90 +1886,97 @@
                       <button className="nd-freq-btn" disabled={!canAct} title="Re-read the BMC"
                         onClick={() => runProfile({ op: "status" })}>↻</button>
                     </div>
-                  </div>
-                )}
-
-                {legacy && !profileApi && (
-                  <div>
-                    <div style={sectionLbl}>Mode</div>
+                  ) : legacy && (
                     <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                       <select value={mode} onChange={e => setMode(e.target.value)} style={{ ...inputStyle, fontSize: 12 }}>
-                        <option value="auto">Auto (BMC-controlled)</option>
-                        <option value="manual">Manual (override)</option>
+                        <option value="auto">Auto (BMC)</option>
+                        <option value="manual">Manual</option>
                       </select>
-                      <button className="nd-freq-btn" onClick={() => runLegacy(legacy.setMode(mode))} disabled={!canAct}>Set mode</button>
+                      <button className="nd-freq-btn" onClick={() => runLegacy(legacy.setMode(mode))} disabled={!canAct}>Set</button>
                     </div>
-                  </div>
-                )}
+                  ))}
 
-                {supported && (
-                  <div>
-                    <div style={sectionLbl}>Manual duty %</div>
+                  {tab === "manual" && (<>
                     {profileApi && (
-                      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8, fontSize: 12, flexWrap: "wrap" }}>
-                        {[["floor", "Floor — minimum X%, thermal ramps stay on"], ["pin", "Pin — exactly X%, no thermal ramp"]].map(([k, lbl]) => (
-                          <label key={k} style={{ display: "flex", gap: 4, alignItems: "center", cursor: "pointer",
-                            padding: "4px 8px", borderRadius: 6, border: "1px solid var(--line)",
-                            background: kind === k ? "var(--accent-soft)" : "var(--surface-2)" }}>
-                            <input type="radio" name="fankind" checked={kind === k} onChange={() => setKind(k)} />{lbl}
-                          </label>
-                        ))}
-                        <span style={{ color: "var(--muted)" }}>based on</span>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12 }}>
+                        <Seg value={kind} onChange={setKind} options={[
+                          ["floor", "Floor", "Minimum duty; thermal ramps still apply"],
+                          ["pin", "Pin", "Exact duty; ignores temperature"]]} />
+                        {groupNames.length > 0 && <Seg value={perGroup} onChange={setPerGroup} options={[[false, "All"], [true, "Per group"]]} />}
+                        <span style={{ color: "var(--muted)" }}>on</span>
                         <select value={baseProfile} onChange={e => setBaseProfile(e.target.value)} disabled={!profiles}
                           style={{ ...inputStyle, flex: "0 0 auto", fontSize: 12, padding: "4px 6px" }}>
                           {realProfiles.map(p => <option key={p} value={p}>{p}</option>)}
                         </select>
                       </div>
                     )}
-                    {profileApi && kind === "pin" && (
-                      <div style={{ ...notice("crit"), marginBottom: 8 }}>
-                        <b style={{ color: "var(--crit)" }}>Pin disables thermal protection.</b> Fans stay at exactly this duty however hot anything gets. Under GPU load, HIC reached 95 °C at 30% even at idle — use Pin only while watching temperatures, and Activate a real profile afterwards.
+
+                    {profileApi && perGroup ? (
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 6 }}>
+                        {groupNames.map(g => {
+                          const now = groupNow(g);
+                          return (
+                            <label key={g} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12, fontFamily: "var(--mono)" }}>
+                              <span style={{ width: 70 }}><b>{g}</b>{now != null && <span style={{ color: "var(--muted)" }}> {now}%</span>}</span>
+                              <input type="number" value={groupPct[g] ?? ""} min={minPct} max={100}
+                                onChange={e => setGroupPct(p => ({ ...p, [g]: e.target.value }))}
+                                placeholder="—" style={{ ...inputStyle, width: 60 }} />
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {shortPresets.map(p => (
+                          <button key={p} className="nd-freq-preset" onClick={() => setCustomPct(String(p))}
+                            style={String(p) === customPct ? { borderColor: "var(--accent)", color: "var(--accent)" } : undefined}>{p}%</button>
+                        ))}
+                        <input type="number" value={customPct} onChange={e => setCustomPct(e.target.value)}
+                          placeholder="%" min={minPct} max={100} style={{ ...inputStyle, flex: "0 0 70px" }} />
                       </div>
                     )}
-                    {profileApi && pctValid && pctVal < 30 && (
-                      <div style={{ ...notice("warn"), marginBottom: 8 }}>
-                        <b style={{ color: "var(--warn)" }}>Below 30%.</b> At idle HIC reached 95 °C with fans at 30%, so watch it.
-                        {pctVal < 10 && " Below ~10% the CPU fans drop under the BMC's 1,500 rpm warning level (≈9%) and 1,200 rpm critical level (≈6%), which logs fan-failure events and may make the BMC force full speed."}
-                        {kind === "floor" ? " Floor keeps the thermal ramps, so fans still rise as sensors warm." : " With Pin nothing will raise them — you will be asked to confirm."}
-                      </div>
+
+                    {profileApi && kind === "pin" && <div style={lineNote("crit")}>Pin ignores temperature. Watch temps.</div>}
+                    {profileApi && kind !== "pin" && lowestPct != null && lowestPct < 30 && (
+                      <div style={lineNote("warn")}>{lowestPct < 10 ? "Below 10%: BMC may flag fan failure." : "Below 30%: watch HIC temperature."}</div>
                     )}
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-                      {presets.map(p => (
-                        <button key={p} className="nd-freq-preset" onClick={() => setCustomPct(String(p))} title={`${p}% PWM`}>{p}%</button>
-                      ))}
-                    </div>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      <input type="number" value={customPct} onChange={e => setCustomPct(e.target.value)}
-                        placeholder={`% (${minPct}–100)`} min={minPct} max={100} style={inputStyle} />
-                      <button className="nd-freq-btn" disabled={!canAct || !pctValid || (profileApi && !baseProfile)}
+                    {profileApi && perGroup && <div style={{ fontSize: 11, color: "var(--muted)" }}>Blank = keep profile. Other groups can't exceed SYS.</div>}
+
+                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, alignItems: "center" }}>
+                      {(perGroup ? groupBlocked : (customPct !== "" && allBlocked)) &&
+                        <span style={{ fontSize: 11, color: "var(--warn)" }}>{perGroup ? groupBlocked : allBlocked}</span>}
+                      <button className="nd-freq-btn" disabled={!!(perGroup ? groupBlocked : allBlocked)}
                         onClick={() => {
                           if (!profileApi) return runLegacy(legacy.setDuty(pctVal));
-                          if (kind === "pin" && pctVal < 30 && !window.confirm(
-                              `Pin all fans at ${pctVal}% on ${nodeId} with NO thermal protection?\n\n` +
-                              `Nothing will speed the fans up if the node heats. Watch temperatures and ` +
-                              `activate a real profile afterwards.`)) return;
+                          if (perGroup) {
+                            const desc = groupNames.map(g => `${g} ${groupVals[g] == null ? "profile" : groupVals[g] + "%"}`).join(", ");
+                            if (kind === "pin" && !window.confirm(`Pin ${desc} on ${nodeId}? Fans will ignore temperature.`)) return;
+                            return runProfile({ op: "manual", kind, base: baseProfile, groups: groupVals });
+                          }
+                          if (kind === "pin" && pctVal < 30 && !window.confirm(`Pin all fans at ${pctVal}% on ${nodeId}? Fans will ignore temperature.`)) return;
                           runProfile({ op: "manual", pct: pctVal, kind, base: baseProfile });
                         }}>Apply</button>
                     </div>
-                  </div>
-                )}
+                  </>)}
+                </>)}
 
                 {result && (
                   <div style={{ fontFamily: "var(--mono)", fontSize: 12, padding: "6px 10px", borderRadius: 6,
                     background: result.tone === "bad" ? "color-mix(in oklab, var(--crit) 12%, var(--surface-2))"
                               : "color-mix(in oklab, var(--ok) 10%, var(--surface-2))",
-                    color: result.tone === "bad" ? "var(--crit)" : "var(--ink)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    color: result.tone === "bad" ? "var(--crit)" : "var(--ink)", whiteSpace: "pre-wrap", wordBreak: "break-word",
+                    maxHeight: 120, overflowY: "auto" }}>
                     {result.text}
                   </div>
                 )}
 
                 {supported && (
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--line)", paddingTop: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--line)", paddingTop: 8 }}>
                     <span onClick={!canAct ? undefined : () => profileApi
                           ? runProfile({ op: "activate", name: baseProfile || "default" })
                           : runLegacy(legacy.restore())}
                       style={{ fontSize: 11, color: !canAct ? "var(--muted)" : "var(--accent)", cursor: !canAct ? "default" : "pointer", textDecoration: "underline", textDecorationStyle: "dotted" }}>
-                      {profileApi ? `Restore (activate ${baseProfile || "default"}, remove MANUAL)` : "Restore (re-enable auto control)"}
+                      {profileApi ? `Restore ${baseProfile || "default"}` : "Restore auto"}
                     </span>
                     <span style={{ fontSize: 10, color: "var(--muted)" }}>{busy ? "running…" : ""}</span>
                   </div>
@@ -1907,6 +2398,7 @@
         const [fanOpen, setFanOpen] = useState(false);
         const [gpuOpen, setGpuOpen] = useState(false);
         const [coresOpen, setCoresOpen] = useState(false);
+        const [pcieOpen, setPcieOpen] = useState(false);
         const now = useClock();
         const [settings, setSettings] = useState(() => readSettings());
         const baseThr = { ...THR, ...(settings.alerts || {}) };
@@ -2014,11 +2506,12 @@
         const tsText = node.timestampMs ? new Date(node.timestampMs).toLocaleTimeString("en-US",{hour12:false}) : "—";
 
         const controlActions = [
-          {label:"Emergency Shell", icon:"›_", color:"var(--warn)",   desc:"Run a shell command on this node", onClick:() => setShellOpen(true)},
-          {label:"CPU Frequency",   icon:"◱", color:"var(--accent)", desc:"Clamp CPU clock speed", onClick:() => setFreqOpen(true)},
-          {label:"Fan Control",     icon:"✲", color:"var(--accent)", desc:"Override fan speed", onClick:() => setFanOpen(true)},
-          {label:"GPU Tuning",      icon:"⚡", color:"var(--accent)", desc:"Power cap & clocks per GPU", onClick:() => setGpuOpen(true)},
-          {label:"CPU Cores",       icon:"⊞", color:"var(--accent)", desc:"Online/offline individual cores", onClick:() => setCoresOpen(true)},
+          {label:"Emergency Shell", icon:"›_", color:"var(--warn)",   onClick:() => setShellOpen(true)},
+          {label:"CPU Tuning",      icon:"◱", color:"var(--accent)", onClick:() => setFreqOpen(true)},
+          {label:"Fan Control",     icon:"✲", color:"var(--accent)", onClick:() => setFanOpen(true)},
+          {label:"GPU Tuning",      icon:"⚡", color:"var(--accent)", onClick:() => setGpuOpen(true)},
+          {label:"CPU Cores",       icon:"⊞", color:"var(--accent)", onClick:() => setCoresOpen(true)},
+          {label:"PCIe Tuning",     icon:"⇌", color:"var(--accent)", onClick:() => setPcieOpen(true)},
         ];
 
         return (
@@ -2100,7 +2593,7 @@
               <div className={`nd-kpi ${fanTone}`}>
                 <div className="nd-kpi-label">Fans</div>
                 <div className="nd-kpi-val">{node.fanOk}<span className="u">/{node.fanTotal} OK</span></div>
-                <div className="nd-kpi-sub">{(node.fanRpm/1000).toFixed(1)} kRPM avg</div>
+                <div className="nd-kpi-sub">{(node.fanRpm/1000).toFixed(1)} kRPM avg{node.fanPct != null && ` (${Math.round(node.fanPct)}%)`}</div>
               </div>
               <div className={`nd-kpi power-kpi ${powTone}`}>
                 <div className="nd-kpi-label">Node Power</div>
@@ -2467,7 +2960,7 @@
                   {[
                     { label:"Total fans", val: node.fanTotal || 0 },
                     { label:"Fans OK",    val: node.fanOk || 0 },
-                    { label:"Avg RPM",    val: (node.fanRpm || 0).toFixed(0) },
+                    { label:"Avg RPM",    val: `${(node.fanRpm || 0).toFixed(0)}${node.fanPct != null ? ` (${Math.round(node.fanPct)}%)` : ""}` },
                     { label:"OK Ratio",   val: `${(fanRatio*100).toFixed(0)}%` },
                   ].map(s => (
                     <div key={s.label} style={{ flex:1, minWidth:80, padding:"8px 12px", borderRadius:8, background:"var(--surface-2)", border:"1px solid var(--line)" }}>
@@ -2487,7 +2980,7 @@
                           <div style={{ fontSize: 13, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>
                             {ok ? `${(f.rpm/1000).toFixed(1)}k` : "FAIL"}
                           </div>
-                          <div style={{ fontSize: 8, opacity: 0.7, fontWeight: 600 }}>RPM</div>
+                          <div style={{ fontSize: 8, opacity: 0.7, fontWeight: 600 }}>RPM{ok && f.pct != null && ` · ${Math.round(f.pct)}%`}</div>
                         </div>
                       );
                     })
@@ -2562,7 +3055,6 @@
                     }}>
                       <span style={{fontSize:18,lineHeight:1}}>{a.icon}</span>
                       <span style={{fontSize:11,fontWeight:800,color:a.color}}>{a.label}</span>
-                      <span style={{fontSize:10,color:"var(--muted)",fontWeight:500}}>{a.desc}</span>
                     </button>
                   ))}
                 </div>
@@ -2610,6 +3102,7 @@
             {fanOpen && <FanModal nodeId={node.id} node={node} onClose={() => setFanOpen(false)} />}
             {gpuOpen && <GpuModal nodeId={node.id} node={node} onClose={() => setGpuOpen(false)} />}
             {coresOpen && <CoreToggleModal nodeId={node.id} node={node} onClose={() => setCoresOpen(false)} />}
+            {pcieOpen && <PcieModal nodeId={node.id} onClose={() => setPcieOpen(false)} />}
           </div>
         );
       }

@@ -114,7 +114,9 @@ function NodeRow({ node, thresholds, visible, onSelect }) {
             <span className="metric-label">Fan</span>
             <div className="metric-value fan-state">
               <window.FanIcon />
-              {(node.fanRpm / 1000).toFixed(1)}<span className="unit">k · {node.fanOk}/{node.fanTotal}</span>
+              {node.fanPct != null
+                ? <>{Math.round(node.fanPct)}<span className="unit">% · {node.fanOk}/{node.fanTotal}</span></>
+                : <>{(node.fanRpm / 1000).toFixed(1)}<span className="unit">k · {node.fanOk}/{node.fanTotal}</span></>}
             </div>
           </div>
         )}

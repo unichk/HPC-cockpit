@@ -299,6 +299,33 @@ function fanBankAndIndex(name) {
   return { bank, idx };
 }
 
+// Measured duty% -> rpm per fan bank on the G494-ZB4 (scc03 sweeps,
+// 2026-09-25; 20% points from scc04). The BMC reports rpm only, so the
+// duty shown in the UI is read back off these curves. Fans of one bank are
+// not identical (odd/even SYS fans differ ~7%), so it is an estimate, ±3%.
+const FAN_DUTY_CURVES = {
+  sys:  [[20, 4481], [35, 7799], [40, 8850], [45, 9889], [50, 11160], [55, 12170], [60, 13375],
+         [65, 14461], [70, 15513], [75, 16724], [80, 17799], [85, 18839], [90, 20022], [95, 21102], [100, 21986]],
+  rear: [[30, 5475], [35, 6592], [40, 7451], [45, 8344], [50, 9416], [55, 10279], [60, 11355],
+         [65, 12225], [70, 13125], [75, 14171], [80, 15083], [85, 15885], [90, 16890], [100, 18731]],
+  ext:  [[30, 12615], [35, 14355], [40, 15795], [45, 17265], [50, 18990], [55, 20430], [60, 22200],
+         [65, 23610], [70, 25200], [75, 26805], [80, 28275], [85, 29685], [90, 31500], [95, 32940], [100, 34380]],
+  cpu:  [[20, 2700], [30, 3750], [35, 4350], [40, 4800], [45, 5325], [50, 5925], [55, 6375], [60, 6825],
+         [65, 7275], [70, 7710], [75, 8025], [80, 8475], [85, 8925], [90, 9375], [95, 9615], [100, 9975]],
+};
+
+// rpm -> estimated duty %, or null for an unknown bank or a stopped fan.
+function fanDutyPct(bank, rpm) {
+  const c = FAN_DUTY_CURVES[bank];
+  if (!c || !(rpm > 0)) return null;
+  if (rpm <= c[0][1]) return Math.max(0, (rpm / c[0][1]) * c[0][0]);   // below the sweep: toward 0
+  for (let i = 1; i < c.length; i++) {
+    const [d0, r0] = c[i - 1], [d1, r1] = c[i];
+    if (rpm <= r1) return d0 + ((rpm - r0) / (r1 - r0)) * (d1 - d0);
+  }
+  return 100;
+}
+
 function perFanRpms(metrics) {
   const out = [];
   const skip = new Set(["min_rpm", "max_rpm", "avg_rpm"]);
@@ -312,7 +339,7 @@ function perFanRpms(metrics) {
       !skip.has(m.name)
     ) {
       const { bank, idx } = fanBankAndIndex(m.name);
-      out.push({ name: m.name, rpm: m.value, bank, idx });
+      out.push({ name: m.name, rpm: m.value, bank, idx, pct: fanDutyPct(bank, m.value) });
     }
   }
   // Known banks first in FAN_BANK_ORDER, then any unrecognised bank
@@ -392,6 +419,12 @@ function mapNode(raw, nowMs) {
   for (let i = 0; i < cpuSocketCount; i++) {
     cpuSockets.push(pickNum(idx, `cpu.socket${i}_power_w`));
   }
+  // HSMP power-efficiency mode per socket; the mode name rides in `text`.
+  const cpuEffModes = [];
+  for (let i = 0; i < cpuSocketCount; i++) {
+    const m = (raw.metrics || []).find(x => x && x.module === "cpu" && x.name === `socket${i}_power_eff_mode`);
+    if (m && typeof m.value === "number") cpuEffModes.push({ socket: i, mode: m.value, name: m.text || "" });
+  }
   const cpuPowerW = pickNum(idx, "cpu.package_power_w");
   const dimmPowerW = pickNum(idx, "memory.dimm_power_w");
   const dimmCount = pickNum(idx, "memory.dimm_count") | 0;
@@ -453,6 +486,10 @@ function mapNode(raw, nowMs) {
   const tempHistory = pushHistory(id, "temp", temp);
   const powerHistory = pushHistory(id, "power", power / 10);
   // One shared time axis: every series above is pushed on the same tick.
+  const perFan = perFanRpms(raw.metrics);
+  // Mean estimated duty of the running fans, shown next to the average rpm.
+  const fanPcts = perFan.map((f) => f.pct).filter((p) => p != null);
+  const fanPct = fanPcts.length ? fanPcts.reduce((a, b) => a + b, 0) / fanPcts.length : null;
   const historyTimes = pushHistory(id, "t", Date.now());
 
   return {
@@ -480,12 +517,14 @@ function mapNode(raw, nowMs) {
     gpuTempWarn,
     gpuTempCrit,
     cpuSockets,
+    cpuEffModes,
     cpuPowerW,
     dimmPowerW,
     dimmCount,
     cpuPowerLimitW,
     historyTimes,
-    perFan: perFanRpms(raw.metrics),
+    perFan,
+    fanPct,
     gpuCount,
     gpuVendor,
     gpus,
@@ -562,6 +601,8 @@ async function fetchNodes() {
   const data = await r.json();
   const now = Date.now();
   const list = Array.isArray(data.nodes) ? data.nodes : [];
+  // Non-node power (e.g. the IB switch): counted in Total Power only.
+  window.cockpitAuxPower = Array.isArray(data.aux_power) ? data.aux_power : [];
 
   // If the list endpoint doesn't embed per-node metrics (older server
   // before node_summaries started returning `metrics`), fetch each

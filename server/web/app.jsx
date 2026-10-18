@@ -86,6 +86,8 @@ function App() {
   const [nodes, setNodes] = useState(() => window.initNodes());
   const [events, setEvents] = useState([]);
   const [dayOffset, setDayOffset] = useState(0);
+  const [me, setMe] = useState(null);
+  useEffect(() => { window.cockpitAuth.me().then(setMe); }, []);
   const thresholds = { ...window.DEFAULT_THRESHOLDS, ...(settings.alerts || {}) };
   const now = useClock();
 
@@ -252,7 +254,14 @@ function App() {
   }, [nodes.length]);
 
   const liveNodes = nodes.filter((n) => !n.offline && n.age < thresholds.ageStale);
-  const totalPower = liveNodes.reduce((a, n) => a + n.power, 0);
+  const nodePower = liveNodes.reduce((a, n) => a + n.power, 0);
+  const auxPower = window.cockpitAuxPower || [];
+  const totalPower = nodePower + auxPower.reduce((a, x) => a + x.watts, 0);
+  const fmtW = (w) => `${Math.round(w).toLocaleString()} W`;
+  const powerRows = [
+    ...liveNodes.map((n) => ({ name: n.id, watts: n.power })),
+    ...auxPower.map((x) => ({ name: x.source, watts: x.watts, aux: true })),
+  ];
   const offlineCount = nodes.length - liveNodes.length;
 
   const thrFor = (n) => window.nodeThresholds(n.id, settings, thresholds);
@@ -315,10 +324,24 @@ function App() {
               <span className="stat-label">Alerts</span>
               <span className="stat-value">{critCount}<span className="unit">c</span> · {warnCount}<span className="unit">w</span></span>
             </div>
-            <div className={`stat has-bar ${powerTone}`}>
+            <div className={`stat has-bar power-stat ${powerTone}`}>
               <span className="stat-label">Total Power</span>
               <span className="stat-value">{Math.round(totalPower).toLocaleString()}<span className="unit">W</span></span>
               <div className="stat-bar"><span style={{ width: `${powerPct}%` }} /></div>
+              {powerRows.length > 0 && (
+                <div className="power-pop" role="tooltip">
+                  {powerRows.map((r) => (
+                    <div key={r.name} className={`power-pop-row${r.aux ? " aux" : ""}`}>
+                      <span>{r.name}</span>
+                      <span>{fmtW(r.watts)}</span>
+                    </div>
+                  ))}
+                  <div className="power-pop-row total">
+                    <span>Total</span>
+                    <span>{fmtW(totalPower)}</span>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -428,12 +451,31 @@ function App() {
             )}
           </button>
 
+          <a className="icon-btn" href="status.html" title="System status">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="6" cy="6" r="2.5"/>
+              <circle cx="18" cy="6" r="2.5"/>
+              <circle cx="6" cy="18" r="2.5"/>
+              <circle cx="18" cy="18" r="2.5"/>
+            </svg>
+          </a>
+
           <a className="icon-btn" href="settings.html" title="Settings">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="3"/>
               <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
             </svg>
           </a>
+
+          {me && me.user && (
+            <button className="icon-btn" onClick={() => window.cockpitAuth.logout()} title={`Log out ${me.user}`}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                <polyline points="16 17 21 12 16 7"/>
+                <line x1="21" y1="12" x2="9" y2="12"/>
+              </svg>
+            </button>
+          )}
         </div>
       </header>
 

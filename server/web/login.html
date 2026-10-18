@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Log in — HPC Cockpit</title>
+  <link rel="icon" type="image/png" href="assets/hpc-cockpit-icon.png" />
+  <link rel="stylesheet" href="vendor/fonts.css" />
+  <link rel="stylesheet" href="styles.css?v=7" />
+  <style>
+    body { overflow: auto; }
+    .lg-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; }
+    .lg-card { width: 100%; max-width: 360px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-md); padding: 26px 24px 22px; }
+    .lg-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+    .lg-head img { width: 30px; height: 30px; }
+    .lg-title { font-size: 18px; font-weight: 800; color: var(--ink); }
+    .lg-sub { font-size: 12px; color: var(--muted); margin: 0 0 18px; font-weight: 500; }
+    .lg-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+    .lg-field label { font-size: 11px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+    .lg-field input { font-family: var(--font); font-size: 14px; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-2); color: var(--ink); outline: none; }
+    .lg-field input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .lg-btn { width: 100%; margin-top: 6px; padding: 10px; border: none; border-radius: 8px; background: var(--accent); color: #fff; font-family: var(--font); font-size: 14px; font-weight: 700; cursor: pointer; }
+    .lg-btn:disabled { opacity: 0.6; cursor: wait; }
+    .lg-error { min-height: 18px; margin-top: 10px; font-size: 12px; font-weight: 600; color: var(--crit); }
+    .lg-foot { margin-top: 14px; font-size: 11px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="lg-wrap">
+    <form class="lg-card" id="form" autocomplete="on">
+      <div class="lg-head">
+        <img src="assets/hpc-cockpit-icon.png" alt="" />
+        <div class="lg-title">HPC Cockpit</div>
+      </div>
+      <p class="lg-sub">Sign in with your cluster (LDAP) account.</p>
+      <div class="lg-field">
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus />
+      </div>
+      <div class="lg-field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+      </div>
+      <button class="lg-btn" id="submit" type="submit">Log in</button>
+      <div class="lg-error" id="error" role="alert"></div>
+      <div class="lg-foot">Sessions last 12 hours.</div>
+    </form>
+  </div>
+
+  <script>
+    try {
+      const raw = localStorage.getItem("cockpit_settings_v1");
+      const theme = raw && JSON.parse(raw).theme;
+      if (theme) document.documentElement.dataset.theme = theme;
+    } catch {}
+
+    // Only return to a page on this site: a path starting with one "/".
+    function nextUrl() {
+      const n = new URLSearchParams(window.location.search).get("next") || "/";
+      return n.startsWith("/") && !n.startsWith("//") && !n.includes("\\") ? n : "/";
+    }
+
+    const form = document.getElementById("form");
+    const btn = document.getElementById("submit");
+    const err = document.getElementById("error");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.textContent = "";
+      btn.disabled = true;
+      try {
+        const r = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: document.getElementById("username").value.trim().toLowerCase(),
+            password: document.getElementById("password").value,
+          }),
+        });
+        if (r.ok) {
+          window.location.replace(nextUrl());
+          return;
+        }
+        const body = await r.json().catch(() => ({}));
+        err.textContent = body.error || `Login failed (HTTP ${r.status})`;
+        document.getElementById("password").value = "";
+        document.getElementById("password").focus();
+      } catch (ex) {
+        err.textContent = "Server unreachable";
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,22 +1,40 @@
 #!/usr/bin/env python3
 import argparse
+import ipaddress
 import json
 import os
+import posixpath
+import re
+import secrets
 import socket
 import socketserver
+import ssl
+import subprocess
 import tempfile
 import threading
 import time
 import zlib
 from http import HTTPStatus
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
 import urllib.error
 import urllib.request
-from urllib.parse import unquote
+from urllib.parse import quote, unquote, urlsplit
 
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _prom_name(name: str) -> str:
+    """Prometheus metric names allow [a-zA-Z_:][a-zA-Z0-9_:]*."""
+    name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+    name = re.sub(r"_+", "_", name).strip("_")
+    return name if re.match(r"^[a-zA-Z_]", name) else "_" + name
+
+
+def _prom_escape(value) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 class ScheduleStore:
@@ -274,6 +292,9 @@ class StateStore:
         self._ingest_count = 0
         self._ingest_errors = 0
         self._fake_node_ids = set()
+        # Power drawn by equipment that is not a node (e.g. the IB switch),
+        # keyed by source name: {"watts", "received_at_ms", "remote_ip"}.
+        self._aux_power = {}
 
     def ingest_snapshot(self, payload: bytes, remote_ip: str) -> None:
         # Workers deflate the snapshot so it fits in one unfragmented datagram.
@@ -306,6 +327,10 @@ class StateStore:
         if not isinstance(parsed, dict):
             with self._lock:
                 self._ingest_errors += 1
+            return
+
+        if parsed.get("kind") == "aux_power":
+            self._ingest_aux_power(parsed, remote_ip)
             return
 
         node_id = parsed.get("node_id")
@@ -391,6 +416,32 @@ class StateStore:
             "module_received_at_ms": {n: m["received_at_ms"] for n, m in modules.items()},
         }
 
+    def _ingest_aux_power(self, parsed: dict, remote_ip: str) -> None:
+        """{"kind": "aux_power", "source": "ib-qm8700", "watts": 231.0}.
+        Counted in total power but never shown as a node."""
+        source, watts = parsed.get("source"), parsed.get("watts")
+        if (not isinstance(source, str) or not source.strip()
+                or not isinstance(watts, (int, float)) or isinstance(watts, bool)
+                or not 0 <= watts < 100_000):
+            with self._lock:
+                self._ingest_errors += 1
+            return
+        with self._lock:
+            self._ingest_count += 1
+            self._aux_power[source.strip()] = {
+                "watts": float(watts), "received_at_ms": now_ms(), "remote_ip": remote_ip}
+
+    def aux_power(self) -> list:
+        """Fresh auxiliary power sources; stale ones are left out so a dead
+        poller cannot keep adding a frozen value to the total."""
+        current = now_ms()
+        with self._lock:
+            return sorted(
+                ({"source": k, "watts": v["watts"], "age_ms": current - v["received_at_ms"]}
+                 for k, v in self._aux_power.items()
+                 if current - v["received_at_ms"] <= self.METRICS_STALE_MS),
+                key=lambda r: r["source"])
+
     def health(self) -> dict:
         with self._lock:
             return {
@@ -426,6 +477,70 @@ class StateStore:
                 )
         rows.sort(key=lambda item: item["node_id"])
         return rows
+
+    # A module whose last packet is older than this is left OUT of /metrics
+    # rather than repeated. Prometheus would otherwise record a frozen value
+    # as real history (the BMC that sat at exactly 1425 W for hours is why).
+    # 6x the default 5 s worker interval tolerates a few lost datagrams.
+    METRICS_STALE_MS = 30_000
+
+    def prometheus_text(self) -> str:
+        """Prometheus text exposition (format 0.0.4) of every node's latest,
+        still-fresh metrics. Series are gauges named cockpit_<module>_<name>
+        with a node label; GPU metrics ("<index>.<field>") become
+        cockpit_gpu_<field> with a gpu label. Module freshness is always
+        exported, so a gap in a series can be told apart from a dead node."""
+        current = now_ms()
+        families: dict = {}   # metric name -> {label tuple: value}
+
+        def put(name: str, labels: tuple, value: float) -> None:
+            families.setdefault(name, {})[labels] = value
+
+        with self._lock:
+            for node_id, entry in self._nodes.items():
+                latest = entry.get("latest", {})
+                put("cockpit_node_last_seen_seconds", (("node", node_id),),
+                    latest.get("received_at_ms", 0) / 1000.0)
+                modules = entry.get("modules")
+                if modules is None:
+                    # test-panel fake nodes carry a flat snapshot, no modules
+                    modules = {"": {"metrics": latest.get("metrics", []),
+                                    "received_at_ms": latest.get("received_at_ms", 0)}}
+                for mod_name, mod in modules.items():
+                    age_ms = max(0, current - mod.get("received_at_ms", 0))
+                    fresh = age_ms <= self.METRICS_STALE_MS
+                    if mod_name:
+                        lbl = (("node", node_id), ("module", mod_name))
+                        put("cockpit_module_age_seconds", lbl, age_ms / 1000.0)
+                        put("cockpit_module_fresh", lbl, 1.0 if fresh else 0.0)
+                    if not fresh:
+                        continue
+                    for m in mod.get("metrics", []):
+                        value = m.get("value")
+                        if not isinstance(value, (int, float)) or isinstance(value, bool):
+                            continue          # string_value metrics are not numeric
+                        value = float(value)
+                        if value != value or value in (float("inf"), float("-inf")):
+                            continue
+                        module = m.get("module") or mod_name or "misc"
+                        raw = str(m.get("name", ""))
+                        labels = [("node", node_id)]
+                        gpu = re.match(r"^(\d+)\.(.+)$", raw)
+                        if gpu:
+                            labels.append(("gpu", gpu.group(1)))
+                            raw = gpu.group(2)
+                        put(_prom_name(f"cockpit_{module}_{raw}"), tuple(labels), value)
+
+        for aux in self.aux_power():
+            put("cockpit_aux_power_watts", (("source", aux["source"]),), aux["watts"])
+
+        lines = []
+        for name in sorted(families):
+            lines.append(f"# TYPE {name} gauge")
+            for labels, value in sorted(families[name].items()):
+                body = ",".join(f'{k}="{_prom_escape(v)}"' for k, v in labels)
+                lines.append(f"{name}{{{body}}} {repr(value)}")
+        return "\n".join(lines) + "\n"
 
     def node_detail(self, node_id: str) -> dict:
         with self._lock:
@@ -726,7 +841,7 @@ class StateStore:
 
 # Discord webhook that warn/crit escalations are posted to. Anyone holding this
 # URL can post to that channel, so it is deliberately NOT exposed through
-# /api/settings (which is served without authentication) and is never logged.
+# /api/settings (readable by every logged-in user) and is never logged.
 # --discord-webhook / HPC_COCKPIT_DISCORD_WEBHOOK override it; "" disables.
 DISCORD_WEBHOOK_URL = (
     "https://discord.com/api/webhooks/1547626216046071899/"
@@ -1119,12 +1234,247 @@ def proxy_exec_to_worker(
             pass
 
 
+class AuthManager:
+    """Login against the cluster's LDAP, then an in-memory session cookie.
+
+    A password is checked by binding to LDAP as the user (ldapwhoami over
+    StartTLS), so the cockpit never stores or sees a password hash. The
+    password reaches ldapwhoami through a pipe (-y /dev/fd/N), never argv,
+    the environment or a file. Sessions live in memory: a server restart logs
+    everyone out, which is acceptable for a team dashboard."""
+
+    COOKIE = "cockpit_session"
+    USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+    # Failed logins per client IP before it is refused for the window.
+    MAX_FAILURES = 5
+    FAILURE_WINDOW_S = 600
+
+    def __init__(self, ldap_uri: str, user_dn_template: str, session_hours: float,
+                 login_group: str = "") -> None:
+        self.ldap_uri = ldap_uri
+        self.user_dn_template = user_dn_template
+        self.session_s = session_hours * 3600
+        self.login_group = login_group
+        self._lock = threading.Lock()
+        self._sessions = {}   # token -> {"user", "expires"}
+        self._failures = {}   # ip -> [monotonic times of recent failures]
+
+    def throttled(self, ip: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            recent = [t for t in self._failures.get(ip, []) if now - t < self.FAILURE_WINDOW_S]
+            self._failures[ip] = recent
+            return len(recent) >= self.MAX_FAILURES
+
+    def _record_failure(self, ip: str) -> None:
+        with self._lock:
+            self._failures.setdefault(ip, []).append(time.monotonic())
+
+    def _in_group(self, user: str) -> bool:
+        if not self.login_group:
+            return True
+        try:
+            import grp
+            import pwd
+            entry = pwd.getpwnam(user)
+            gids = os.getgrouplist(user, entry.pw_gid)
+            return any(grp.getgrgid(g).gr_name == self.login_group for g in gids)
+        except (KeyError, OSError):
+            return False
+
+    def _ldap_bind(self, user: str, password: str) -> bool:
+        dn = self.user_dn_template.format(user=user)
+        read_fd, write_fd = os.pipe()
+        try:
+            # Passwords are small; the pipe buffer holds it without a reader.
+            os.write(write_fd, password.encode("utf-8"))
+            os.close(write_fd)
+            write_fd = -1
+            proc = subprocess.run(
+                ["ldapwhoami", "-x", "-ZZ", "-H", self.ldap_uri, "-D", dn,
+                 "-y", f"/dev/fd/{read_fd}"],
+                pass_fds=(read_fd,), stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"login_error user={user} msg={type(exc).__name__}")
+            return False
+        finally:
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+            # "Invalid credentials" is the normal wrong-password answer; any
+            # other message means LDAP itself is unreachable or misconfigured.
+            if err and "Invalid credentials" not in err[-1]:
+                print(f"login_ldap_error user={user} msg={err[-1][:200]}")
+            return False
+        return True
+
+    def login(self, user: str, password: str, ip: str):
+        """Returns (token, None) or (None, reason)."""
+        if self.throttled(ip):
+            return None, "throttled"
+        # An empty password makes an LDAP simple bind "unauthenticated" and it
+        # SUCCEEDS, so it must be refused here, before LDAP sees it.
+        if not isinstance(user, str) or not self.USERNAME_RE.match(user) \
+                or not isinstance(password, str) or not password or len(password) > 1024:
+            self._record_failure(ip)
+            return None, "invalid"
+        if not self._ldap_bind(user, password) or not self._in_group(user):
+            self._record_failure(ip)
+            print(f"login_failed user={user} ip={ip}")
+            return None, "invalid"
+        token = secrets.token_urlsafe(32)
+        with self._lock:
+            now = time.time()
+            self._sessions = {t: s for t, s in self._sessions.items() if s["expires"] > now}
+            self._sessions[token] = {"user": user, "expires": now + self.session_s}
+            self._failures.pop(ip, None)
+        print(f"login_ok user={user} ip={ip}")
+        return token, None
+
+    def session_user(self, token: str):
+        if not token:
+            return None
+        with self._lock:
+            s = self._sessions.get(token)
+            if s is None:
+                return None
+            if s["expires"] <= time.time():
+                del self._sessions[token]
+                return None
+            return s["user"]
+
+    def logout(self, token: str) -> None:
+        with self._lock:
+            self._sessions.pop(token, None)
+
+
 class ApiHandler(SimpleHTTPRequestHandler):
     state: StateStore = None
     schedule: ScheduleStore = None
     settings: SettingsStore = None
     test_mode: bool = False
     worker_exec_port: int = 9100
+    auth: AuthManager = None      # None only with --no-auth
+    tls: bool = False
+
+    # Reachable without a session: the login page and what it loads.
+    PUBLIC_PATHS = {"/login.html", "/styles.css", "/vendor/fonts.css", "/auth.js"}
+    PUBLIC_PREFIXES = ("/vendor/fonts/", "/assets/")
+
+    def _clean_path(self) -> str:
+        path = posixpath.normpath(unquote(urlsplit(self.path).path))
+        return "/" if path in (".", "") else path
+
+    def _session_token(self) -> str:
+        raw = self.headers.get("Cookie", "")
+        if not raw:
+            return ""
+        try:
+            morsel = SimpleCookie(raw).get(AuthManager.COOKIE)
+        except Exception:
+            return ""
+        return morsel.value if morsel else ""
+
+    def _from_this_host(self) -> bool:
+        ip = self.client_address[0]
+        try:
+            if ipaddress.ip_address(ip).is_loopback:
+                return True
+        except ValueError:
+            return False
+        # Prometheus on this host scraping ntu-scc04:8080 connects from the
+        # host's own address, which is also the address it connected to.
+        return ip == self.connection.getsockname()[0]
+
+    def _gate(self) -> bool:
+        """Every request passes through here first. Returns True to proceed;
+        otherwise the response (401 / 302 / 403) has already been sent."""
+        self.user = None
+        if self.auth is None:
+            return True
+        path = self._clean_path()
+        if self.command in ("POST", "PUT", "DELETE"):
+            # SameSite=Strict already keeps the cookie off cross-site
+            # requests; refusing a foreign Origin is a second guard.
+            origin = self.headers.get("Origin")
+            if origin and urlsplit(origin).netloc != self.headers.get("Host", ""):
+                self._json({"error": "cross-origin request refused"}, status=HTTPStatus.FORBIDDEN)
+                return False
+        if path in ("/api/login", "/api/logout"):
+            return True
+        if self.command in ("GET", "HEAD") and (
+                path in self.PUBLIC_PATHS or path.startswith(self.PUBLIC_PREFIXES)):
+            return True
+        if path == "/metrics" and self._from_this_host():
+            return True
+        self.user = self.auth.session_user(self._session_token())
+        if self.user:
+            return True
+        if path.startswith("/api/") or path == "/metrics":
+            self._json({"error": "login required"}, status=HTTPStatus.UNAUTHORIZED)
+        elif self.command in ("GET", "HEAD") and (path == "/" or path.endswith(".html")):
+            target = urlsplit(self.path)
+            nxt = target.path + (f"?{target.query}" if target.query else "")
+            self.send_response(HTTPStatus.FOUND.value)
+            self.send_header("Location", "/login.html?next=" + quote(nxt, safe=""))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            self.send_response(HTTPStatus.UNAUTHORIZED.value)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        return False
+
+    def _set_session_cookie(self, token: str, max_age: int) -> None:
+        parts = [f"{AuthManager.COOKIE}={token}", "Path=/", "HttpOnly", "SameSite=Strict",
+                 f"Max-Age={max_age}"]
+        if self.tls:
+            parts.append("Secure")
+        self.send_header("Set-Cookie", "; ".join(parts))
+
+    def _handle_login(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._json({"error": "body must be an object"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        token, err = self.auth.login(body.get("username"), body.get("password"),
+                                     self.client_address[0])
+        if err == "throttled":
+            self._json({"error": "too many failed logins, try again in 10 minutes"},
+                       status=HTTPStatus.TOO_MANY_REQUESTS)
+            return
+        if err:
+            self._json({"error": "wrong username or password"}, status=HTTPStatus.UNAUTHORIZED)
+            return
+        encoded = json.dumps({"user": body.get("username")}).encode("utf-8")
+        self.send_response(HTTPStatus.OK.value)
+        self._set_session_cookie(token, int(self.auth.session_s))
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def _handle_logout(self) -> None:
+        if self.auth is not None:
+            self.auth.logout(self._session_token())
+        encoded = b'{"ok": true}'
+        self.send_response(HTTPStatus.OK.value)
+        self._set_session_cookie("", 0)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def do_HEAD(self) -> None:
+        if not self._gate():
+            return
+        super().do_HEAD()
 
     def __init__(self, *args, **kwargs):
         web_dir = kwargs.pop("web_dir")
@@ -1140,6 +1490,13 @@ class ApiHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self) -> None:
+        if not self._gate():
+            return
+
+        if self.path == "/api/me":
+            self._json({"user": self.user, "auth": self.auth is not None})
+            return
+
         if self.path == "/api/config":
             self._json({"test_panel": self.test_mode})
             return
@@ -1149,7 +1506,8 @@ class ApiHandler(SimpleHTTPRequestHandler):
             return
 
         if self.path == "/api/nodes":
-            self._json({"nodes": self.state.node_summaries()})
+            self._json({"nodes": self.state.node_summaries(),
+                        "aux_power": self.state.aux_power()})
             return
 
         if self.path == "/api/cluster":
@@ -1173,6 +1531,15 @@ class ApiHandler(SimpleHTTPRequestHandler):
             self._json(self.settings.get())
             return
 
+        if self.path.split("?", 1)[0] == "/metrics":
+            encoded = self.state.prometheus_text().encode("utf-8")
+            self.send_response(HTTPStatus.OK.value)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+            return
+
         if self.path == "/api/sounds":
             sounds_dir = os.path.join(self.directory, "sounds")
             files = []
@@ -1190,6 +1557,8 @@ class ApiHandler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_PUT(self) -> None:
+        if not self._gate():
+            return
         event_id = self._match_schedule_id()
         if event_id is None:
             self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
@@ -1207,6 +1576,8 @@ class ApiHandler(SimpleHTTPRequestHandler):
         self._json(event)
 
     def do_DELETE(self) -> None:
+        if not self._gate():
+            return
         event_id = self._match_schedule_id()
         if event_id is None:
             self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
@@ -1240,6 +1611,20 @@ class ApiHandler(SimpleHTTPRequestHandler):
             return None
 
     def do_POST(self) -> None:
+        if not self._gate():
+            return
+
+        if self.path == "/api/login":
+            if self.auth is None:
+                self._json({"error": "login disabled (--no-auth)"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._handle_login()
+            return
+
+        if self.path == "/api/logout":
+            self._handle_logout()
+            return
+
         if self.path == "/api/schedule":
             body = self._read_json_body()
             if body is None:
@@ -1387,6 +1772,63 @@ class ApiHandler(SimpleHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
+class HttpsRedirectHandler(BaseHTTPRequestHandler):
+    """Answers a plain-HTTP request that reached the HTTPS port with a
+    redirect to the same URL over https, so old http:// bookmarks keep
+    working. Nothing else is served without TLS."""
+
+    def _redirect(self) -> None:
+        host = self.headers.get("Host", "")
+        if not host or not re.match(r"^[A-Za-z0-9.\-\[\]:]+$", host):
+            self.send_error(HTTPStatus.BAD_REQUEST.value, "use https://")
+            return
+        self.send_response(HTTPStatus.MOVED_PERMANENTLY.value)
+        self.send_header("Location", f"https://{host}{self.path}")
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = _redirect
+
+    def log_message(self, fmt, *args) -> None:
+        pass
+
+
+class TlsHTTPServer(ThreadingHTTPServer):
+    """HTTPS with a plain-HTTP redirect on the same port.
+
+    TLS is set up per connection inside the request's own thread, so a slow
+    or stalled client never blocks accept() for everyone else. The first byte
+    tells the two apart: a TLS ClientHello starts with 0x16, an HTTP request
+    with a method name."""
+
+    tls_context: ssl.SSLContext = None
+
+    def finish_request(self, request, client_address) -> None:
+        request.settimeout(10)
+        try:
+            first = request.recv(1, socket.MSG_PEEK)
+        except OSError:
+            return
+        if not first:
+            return
+        if first != b"\x16":
+            HttpsRedirectHandler(request, client_address, self)
+            return
+        try:
+            tls_sock = self.tls_context.wrap_socket(request, server_side=True)
+        except (ssl.SSLError, OSError):
+            return  # failed handshake: certificate rejected, scanner, ...
+        tls_sock.settimeout(None)
+        try:
+            self.RequestHandlerClass(tls_sock, client_address, self)
+        finally:
+            try:
+                tls_sock.close()
+            except OSError:
+                pass
+
+
 class SnapshotUDPServer(socketserver.ThreadingUDPServer):
     # socketserver defaults max_packet_size to 8192 and silently truncates
     # anything larger, which then fails to parse and is counted as an ingest
@@ -1414,16 +1856,30 @@ def start_http_server(
     settings: SettingsStore,
     web_dir: str,
     worker_exec_port: int,
+    auth: "AuthManager" = None,
+    tls_context: "ssl.SSLContext" = None,
 ) -> ThreadingHTTPServer:
     ApiHandler.state = state
     ApiHandler.schedule = schedule
     ApiHandler.settings = settings
     ApiHandler.worker_exec_port = worker_exec_port
+    ApiHandler.auth = auth
+    ApiHandler.tls = tls_context is not None
 
     def factory(*args, **kwargs):
         return ApiHandler(*args, web_dir=web_dir, **kwargs)
 
-    return ThreadingHTTPServer((bind_host, bind_port), factory)
+    if tls_context is None:
+        return ThreadingHTTPServer((bind_host, bind_port), factory)
+    server = TlsHTTPServer((bind_host, bind_port), factory)
+    server.tls_context = tls_context
+    return server
+
+
+# Where the HTTPS certificate is picked up from when no --tls-* flag is given.
+# Outside the repo, so the private key can never be committed.
+DEFAULT_TLS_DIR = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "hpc-cockpit", "tls")
 
 
 def parse_args() -> argparse.Namespace:
@@ -1449,6 +1905,28 @@ def parse_args() -> argparse.Namespace:
         help="Discord webhook for warn/crit alerts (default: built-in; "
              "empty string disables; env HPC_COCKPIT_DISCORD_WEBHOOK also works)",
     )
+    parser.add_argument(
+        "--ldap-uri", default="ldap://ntu-scc04",
+        help="LDAP server checked at login, via StartTLS (default: ldap://ntu-scc04)")
+    parser.add_argument(
+        "--ldap-user-dn", default="uid={user},ou=people,dc=scc26,dc=ntu,dc=local",
+        help="DN template a user binds as; {user} is replaced by the login name")
+    parser.add_argument(
+        "--login-group", default="",
+        help="only members of this Unix/LDAP group may log in (default: any LDAP user)")
+    parser.add_argument(
+        "--session-hours", type=float, default=12.0,
+        help="how long a login lasts (default: 12)")
+    parser.add_argument(
+        "--no-auth", action="store_true",
+        help="serve everything without a login (local testing only)")
+    parser.add_argument(
+        "--tls-cert", default=None,
+        help=f"PEM certificate (default: {DEFAULT_TLS_DIR}/cockpit.crt if it exists)")
+    parser.add_argument(
+        "--tls-key", default=None,
+        help=f"PEM private key (default: {DEFAULT_TLS_DIR}/cockpit.key if it exists)")
+    parser.add_argument("--no-tls", action="store_true", help="serve plain HTTP even if a certificate exists")
     parser.add_argument(
         "--worker-exec-port",
         type=int,
@@ -1479,6 +1957,28 @@ def main() -> int:
         print("error: worker-exec-port must be between 1 and 65535")
         return 2
 
+    auth = None
+    if not args.no_auth:
+        auth = AuthManager(args.ldap_uri, args.ldap_user_dn, args.session_hours,
+                           args.login_group)
+    tls_context = None
+    # HTTPS turns on by itself when the certificate and key sit in the default
+    # place, so the server needs no arguments; flags override, --no-tls opts out.
+    if not args.no_tls and not args.tls_cert and not args.tls_key:
+        cert = os.path.join(DEFAULT_TLS_DIR, "cockpit.crt")
+        key = os.path.join(DEFAULT_TLS_DIR, "cockpit.key")
+        if os.path.isfile(cert) and os.path.isfile(key):
+            args.tls_cert, args.tls_key = cert, key
+    if args.no_tls:
+        args.tls_cert = args.tls_key = None
+    if args.tls_cert or args.tls_key:
+        if not (args.tls_cert and args.tls_key):
+            print("error: --tls-cert and --tls-key go together")
+            return 2
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        tls_context.load_cert_chain(args.tls_cert, args.tls_key)
+
     udp_server = start_udp_server(args.udp_host, args.udp_port, state)
     http_server = start_http_server(
         args.http_host,
@@ -1488,6 +1988,8 @@ def main() -> int:
         settings,
         web_dir,
         args.worker_exec_port,
+        auth,
+        tls_context,
     )
 
     udp_thread = threading.Thread(target=udp_server.serve_forever, daemon=True)
@@ -1504,6 +2006,12 @@ def main() -> int:
     # Never print the URL itself.
     print(f"discord_alerts={'on' if notifier else 'off'}")
 
+    if auth is None:
+        print("auth=OFF (--no-auth): every endpoint is open")
+    else:
+        print(f"auth=ldap uri={args.ldap_uri} group={args.login_group or '(any)'} "
+              f"session_hours={args.session_hours:g} "
+              f"tls={'on cert=' + args.tls_cert if tls_context else 'off'}")
     print(
         f"udp_listen={args.udp_host}:{args.udp_port} "
         f"http_listen={args.http_host}:{args.http_port} "
