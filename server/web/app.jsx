@@ -86,8 +86,6 @@ function App() {
   const [nodes, setNodes] = useState(() => window.initNodes());
   const [events, setEvents] = useState([]);
   const [dayOffset, setDayOffset] = useState(0);
-  const [me, setMe] = useState(null);
-  useEffect(() => { window.cockpitAuth.me().then(setMe); }, []);
   const thresholds = { ...window.DEFAULT_THRESHOLDS, ...(settings.alerts || {}) };
   const now = useClock();
 
@@ -460,6 +458,15 @@ function App() {
             </svg>
           </a>
 
+          <a className="icon-btn" href="directory.html" title="Users & groups">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+            </svg>
+          </a>
+
           <a className="icon-btn" href="settings.html" title="Settings">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="3"/>
@@ -467,15 +474,8 @@ function App() {
             </svg>
           </a>
 
-          {me && me.user && (
-            <button className="icon-btn" onClick={() => window.cockpitAuth.logout()} title={`Log out ${me.user}`}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-                <polyline points="16 17 21 12 16 7"/>
-                <line x1="21" y1="12" x2="9" y2="12"/>
-              </svg>
-            </button>
-          )}
+          <cockpitWatchdog.Button />
+          <cockpitAuth.LogoutButton />
         </div>
       </header>
 

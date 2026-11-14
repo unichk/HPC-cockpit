@@ -316,6 +316,8 @@ function SettingsApp() {
               </svg>
             )}
           </button>
+          <cockpitWatchdog.Button />
+          <cockpitAuth.LogoutButton />
         </div>
       </header>
 

@@ -42,4 +42,30 @@
       window.location.href = "login.html";
     },
   };
+
+  // The one log-out button every page puts in its top bar: <cockpitAuth.LogoutButton />.
+  // Renders nothing with --no-auth (no user). React is looked up at render
+  // time, so this file can load before React does.
+  let mePromise = null;
+  window.cockpitAuth.LogoutButton = function LogoutButton() {
+    const h = React.createElement;
+    const [user, setUser] = React.useState(null);
+    React.useEffect(() => {
+      mePromise = mePromise || window.cockpitAuth.me();
+      let alive = true;
+      mePromise.then((m) => { if (alive) setUser(m && m.user); });
+      return () => { alive = false; };
+    }, []);
+    if (!user) return null;
+    return h("button", {
+      className: "icon-btn", title: "Log out " + user,
+      onClick: () => window.cockpitAuth.logout(),
+    }, h("svg", {
+      width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
+      strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round",
+    },
+      h("path", { d: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" }),
+      h("polyline", { points: "16 17 21 12 16 7" }),
+      h("line", { x1: 21, y1: 12, x2: 9, y2: 12 })));
+  };
 })();

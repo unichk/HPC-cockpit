@@ -878,6 +878,135 @@ def reason_emoji(text: str) -> str:
     return "\u2022"
 
 
+class Watchdog:
+    """Power watchdog mode: when armed, checks cluster power against a limit.
+
+    Its state lives in its own file (not settings.json) so the settings page,
+    which saves the whole settings object, can never switch it off by writing
+    back a stale copy.
+
+    PLACEHOLDER: the check loop runs, but crossing the limit only calls
+    on_limit_exceeded(), which logs and does nothing else yet. The real
+    response (run a command / cap power) goes there."""
+
+    INTERVAL_S = 5
+    STALE_MS = 60000          # node readings older than this are not counted
+    MIN_LIMIT_W = 100
+    MAX_LIMIT_W = 100000
+
+    def __init__(self, path: str, state: "StateStore") -> None:
+        self._path = path
+        self._state = state
+        self._lock = threading.Lock()
+        self._cfg = {"enabled": False, "limit_w": 10000}
+        self._live = {"total_w": None, "nodes_counted": 0, "exceeded": False,
+                      "checked_ms": None, "last_trigger_ms": None, "trigger_count": 0}
+        self._stop = threading.Event()
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            with open(self._path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            return
+        if isinstance(data, dict):
+            self._cfg["enabled"] = bool(data.get("enabled", False))
+            limit = data.get("limit_w")
+            if isinstance(limit, (int, float)) and self.MIN_LIMIT_W <= limit <= self.MAX_LIMIT_W:
+                self._cfg["limit_w"] = float(limit)
+
+    def _save_locked(self) -> None:
+        directory = os.path.dirname(os.path.abspath(self._path)) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".watchdog-", suffix=".json.tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(self._cfg, handle, indent=2)
+                handle.write("\n")
+            os.replace(tmp, self._path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    def get(self) -> dict:
+        with self._lock:
+            return {**self._cfg, **self._live}
+
+    def update(self, payload: dict, user: str = None):
+        if not isinstance(payload, dict):
+            return None, "body must be an object"
+        with self._lock:
+            cfg = dict(self._cfg)
+            if "enabled" in payload:
+                if not isinstance(payload["enabled"], bool):
+                    return None, "enabled must be true or false"
+                cfg["enabled"] = payload["enabled"]
+            if "limit_w" in payload:
+                limit = payload["limit_w"]
+                if isinstance(limit, bool) or not isinstance(limit, (int, float)) \
+                        or not self.MIN_LIMIT_W <= limit <= self.MAX_LIMIT_W:
+                    return None, f"limit_w must be a number from {self.MIN_LIMIT_W} to {self.MAX_LIMIT_W}"
+                cfg["limit_w"] = float(limit)
+            changed = cfg != self._cfg
+            self._cfg = cfg
+            if not cfg["enabled"]:
+                self._live["exceeded"] = False
+            self._save_locked()
+        if changed:
+            print(f"watchdog_update enabled={cfg['enabled']} limit_w={cfg['limit_w']:g} by={user or '-'}")
+        self._check()  # reflect the new limit right away, not on the next tick
+        return self.get(), None
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.INTERVAL_S):
+            try:
+                self._check()
+            except Exception as exc:
+                print(f"watchdog_error msg={exc}")
+
+    def _total_power(self) -> tuple:
+        total, counted = 0.0, 0
+        for row in self._state.node_summaries():
+            if row.get("age_ms", 0) > self.STALE_MS:
+                continue
+            for m in row.get("metrics", []):
+                if isinstance(m, dict) and m.get("module") == "power" and m.get("name") == "watts" \
+                        and isinstance(m.get("value"), (int, float)):
+                    total += float(m["value"])
+                    counted += 1
+                    break
+        for aux in self._state.aux_power():
+            total += float(aux["watts"])
+        return total, counted
+
+    def _check(self) -> None:
+        total, counted = self._total_power()
+        with self._lock:
+            enabled, limit = self._cfg["enabled"], self._cfg["limit_w"]
+            self._live["total_w"] = total if counted else None
+            self._live["nodes_counted"] = counted
+            self._live["checked_ms"] = now_ms()
+            exceeded = enabled and counted > 0 and total > limit
+            self._live["exceeded"] = exceeded
+            if exceeded:
+                self._live["last_trigger_ms"] = now_ms()
+                self._live["trigger_count"] += 1
+        if exceeded:
+            self.on_limit_exceeded(total, limit)
+
+    def on_limit_exceeded(self, total_w: float, limit_w: float) -> None:
+        # PLACEHOLDER: nothing is enforced yet. Replace this with the real
+        # response (run a command, cap node power, ...). Called once per check
+        # (every INTERVAL_S) for as long as the cluster stays over the limit.
+        print(f"watchdog_exceeded total_w={total_w:.0f} limit_w={limit_w:.0f} action=none(placeholder)")
+
+
 class AlertNotifier:
     """Watches StateStore and posts node warn/crit escalations to Discord.
 
@@ -1290,8 +1419,12 @@ class AuthManager:
             os.write(write_fd, password.encode("utf-8"))
             os.close(write_fd)
             write_fd = -1
+            # StartTLS protects the password on the wire. An ldapi:// URI is a
+            # local Unix socket, so there is no wire to protect and StartTLS
+            # is skipped (slapd may not have TLS configured at all).
+            tls = [] if self.ldap_uri.startswith("ldapi://") else ["-ZZ"]
             proc = subprocess.run(
-                ["ldapwhoami", "-x", "-ZZ", "-H", self.ldap_uri, "-D", dn,
+                ["ldapwhoami", "-x", *tls, "-H", self.ldap_uri, "-D", dn,
                  "-y", f"/dev/fd/{read_fd}"],
                 pass_fds=(read_fd,), stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10,
@@ -1352,7 +1485,131 @@ class AuthManager:
             self._sessions.pop(token, None)
 
 
+class LdapDirectory:
+    """Read-only listing of the LDAP users and groups, for the directory page.
+
+    Searches anonymously with ldapsearch (the same server login uses), so the
+    cockpit holds no LDAP credentials. Only posix attributes are requested;
+    password hashes are never asked for. Results are cached briefly so a page
+    left open does not hammer slapd."""
+
+    CACHE_S = 30
+    USER_ATTRS = ["uid", "cn", "displayName", "uidNumber", "gidNumber",
+                  "homeDirectory", "loginShell", "mail"]
+    GROUP_ATTRS = ["cn", "gidNumber", "memberUid", "member", "description"]
+
+    def __init__(self, ldap_uri: str, user_dn_template: str) -> None:
+        self.ldap_uri = ldap_uri
+        # The directory root is the dc=... tail of the login DN template,
+        # e.g. uid={user},ou=people,dc=asc26,dc=ntu,dc=local -> dc=asc26,...
+        parts = [p.strip() for p in user_dn_template.split(",")]
+        dcs = [p for p in parts if p.lower().startswith("dc=")]
+        self.base = ",".join(dcs)
+        self._lock = threading.Lock()
+        self._cache = None
+        self._cache_at = 0.0
+
+    @staticmethod
+    def _parse_ldif(text: str) -> list:
+        """Minimal LDIF reader: folded lines, base64 (attr::) values, multi-valued attrs."""
+        import base64
+        entries, cur, lines = [], None, []
+        for raw in text.splitlines():
+            if raw.startswith(" ") and lines:
+                lines[-1] += raw[1:]
+            else:
+                lines.append(raw)
+        for line in lines + [""]:
+            if not line.strip():
+                if cur:
+                    entries.append(cur)
+                cur = None
+                continue
+            if line.startswith("#") or ":" not in line:
+                continue
+            key, _, val = line.partition(":")
+            if val.startswith(":"):
+                try:
+                    val = base64.b64decode(val[1:].strip()).decode("utf-8", "replace")
+                except ValueError:
+                    val = ""
+            else:
+                val = val.strip()
+            cur = cur or {}
+            cur.setdefault(key.lower(), []).append(val)
+        return entries
+
+    def _search(self, filt: str, attrs: list) -> list:
+        tls = [] if self.ldap_uri.startswith("ldapi://") else ["-ZZ"]
+        proc = subprocess.run(
+            ["ldapsearch", "-x", "-LLL", *tls, "-o", "ldif-wrap=no", "-H", self.ldap_uri,
+             "-b", self.base, filt, *attrs],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+            raise RuntimeError(err[-1] if err else f"ldapsearch exit {proc.returncode}")
+        return self._parse_ldif(proc.stdout.decode("utf-8", "replace"))
+
+    def listing(self) -> dict:
+        with self._lock:
+            now = time.monotonic()
+            if self._cache is not None and now - self._cache_at < self.CACHE_S:
+                return self._cache
+        first = lambda e, k: (e.get(k.lower()) or [""])[0]
+        num = lambda s: int(s) if s.lstrip("-").isdigit() else None
+        try:
+            raw_users = self._search("(objectClass=posixAccount)", self.USER_ATTRS)
+            raw_groups = self._search("(|(objectClass=posixGroup)(objectClass=groupOfNames))",
+                                      self.GROUP_ATTRS)
+        except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
+            return {"error": str(exc)[:300], "uri": self.ldap_uri, "base": self.base}
+
+        groups = []
+        for e in raw_groups:
+            members = list(e.get("memberuid", []))
+            # groupOfNames lists full DNs; keep just the uid/cn part.
+            for dn in e.get("member", []):
+                rdn = dn.split(",", 1)[0]
+                members.append(rdn.split("=", 1)[1] if "=" in rdn else rdn)
+            groups.append({"cn": first(e, "cn"), "gid": num(first(e, "gidNumber")),
+                           "description": first(e, "description"), "members": sorted(set(members))})
+        gid_name = {g["gid"]: g["cn"] for g in groups if g["gid"] is not None}
+
+        users = []
+        for e in raw_users:
+            uid = first(e, "uid")
+            gid = num(first(e, "gidNumber"))
+            primary = gid_name.get(gid)
+            if primary is None and gid is not None:
+                try:
+                    import grp
+                    primary = grp.getgrgid(gid).gr_name
+                except (KeyError, OverflowError):
+                    primary = None
+            users.append({
+                "uid": uid, "name": first(e, "displayName") or first(e, "cn"),
+                "uidNumber": num(first(e, "uidNumber")), "gid": gid, "primaryGroup": primary,
+                "home": first(e, "homeDirectory"), "shell": first(e, "loginShell"),
+                "mail": first(e, "mail"),
+                "groups": sorted(g["cn"] for g in groups if uid in g["members"]),
+            })
+        # Primary-group members are implicit in posix: show them on the group too.
+        for g in groups:
+            g["primaryMembers"] = sorted(u["uid"] for u in users if u["gid"] == g["gid"] and g["gid"] is not None)
+
+        users.sort(key=lambda u: (u["uidNumber"] is None, u["uidNumber"] or 0, u["uid"]))
+        groups.sort(key=lambda g: (g["gid"] is None, g["gid"] or 0, g["cn"]))
+        result = {"uri": self.ldap_uri, "base": self.base, "users": users, "groups": groups,
+                  "fetched_ms": int(time.time() * 1000)}
+        with self._lock:
+            self._cache, self._cache_at = result, time.monotonic()
+        return result
+
+
 class ApiHandler(SimpleHTTPRequestHandler):
+    ldap_dir: "LdapDirectory" = None
+    watchdog: "Watchdog" = None
     state: StateStore = None
     schedule: ScheduleStore = None
     settings: SettingsStore = None
@@ -1531,6 +1788,17 @@ class ApiHandler(SimpleHTTPRequestHandler):
             self._json(self.settings.get())
             return
 
+        if self.path == "/api/watchdog":
+            self._json(self.watchdog.get())
+            return
+
+        if self.path == "/api/ldap":
+            if self.ldap_dir is None:
+                self._json({"error": "LDAP directory not configured"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._json(self.ldap_dir.listing())
+            return
+
         if self.path.split("?", 1)[0] == "/metrics":
             encoded = self.state.prometheus_text().encode("utf-8")
             self.send_response(HTTPStatus.OK.value)
@@ -1634,6 +1902,17 @@ class ApiHandler(SimpleHTTPRequestHandler):
                 self._json({"error": err}, status=HTTPStatus.BAD_REQUEST)
                 return
             self._json(event, status=HTTPStatus.CREATED)
+            return
+
+        if self.path == "/api/watchdog":
+            body = self._read_json_body()
+            if body is None:
+                return
+            saved, err = self.watchdog.update(body, getattr(self, "user", None))
+            if err:
+                self._json({"error": err}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._json(saved)
             return
 
         if self.path == "/api/settings":
@@ -1961,6 +2240,7 @@ def main() -> int:
     if not args.no_auth:
         auth = AuthManager(args.ldap_uri, args.ldap_user_dn, args.session_hours,
                            args.login_group)
+    ApiHandler.ldap_dir = LdapDirectory(args.ldap_uri, args.ldap_user_dn)
     tls_context = None
     # HTTPS turns on by itself when the certificate and key sit in the default
     # place, so the server needs no arguments; flags override, --no-tls opts out.
@@ -1994,6 +2274,12 @@ def main() -> int:
 
     udp_thread = threading.Thread(target=udp_server.serve_forever, daemon=True)
     udp_thread.start()
+
+    watchdog = Watchdog(os.path.join(os.path.dirname(settings_path) or ".", "watchdog.json"), state)
+    ApiHandler.watchdog = watchdog
+    watchdog.start()
+    wd = watchdog.get()
+    print(f"watchdog={'ARMED' if wd['enabled'] else 'off'} limit_w={wd['limit_w']:g} (action: placeholder)")
 
     # Precedence: --discord-webhook, then the env var, then the built-in URL.
     webhook = args.discord_webhook

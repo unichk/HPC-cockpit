@@ -304,7 +304,9 @@ function evaluateCluster(nodes, aux) {
     if (!found.length && unit === "mariadb") continue;  // optional
     out.push({
       key: unit, label, where: found.map((f) => f.text.split(":")[0]).join(", "),
-      items: found.length ? found : [{ status: UNKNOWN, text: `${unit}: not reported by any node (not a systemd unit, or not installed)` }],
+      // A cluster service no node reports is down as far as anyone can tell:
+      // red, not a neutral "unknown" that reads as fine at a glance.
+      items: found.length ? found : [{ status: FAIL, text: `${unit}: not running on any node (no node reports this systemd unit: not installed, or not a systemd service)` }],
     });
   }
 
@@ -363,8 +365,6 @@ function StatusPage() {
   const [updated, setUpdated] = useState(null);
   const [error, setError] = useState(null);
   const [sel, setSel] = useState(null);  // {row, col} or {cluster: key}
-  const [me, setMe] = useState(null);
-  useEffect(() => { window.cockpitAuth.me().then(setMe); }, []);
 
   useEffect(() => {
     const cached = readCachedSettings();
@@ -399,10 +399,10 @@ function StatusPage() {
   for (const r of rows) for (const c of COLUMNS) { const it = r.cells[c.key]; if (it) tally[statusOf(it)]++; }
   for (const c of cluster) tally[statusOf(c.items)]++;
 
-  // Default selection: the first red, else the first yellow light.
+  // Default selection: the first red, else yellow, else unknown light.
   let selected = sel;
   if (!selected) {
-    outer: for (const want of [FAIL, WARN]) {
+    outer: for (const want of [FAIL, WARN, UNKNOWN]) {
       for (const c of cluster) if (statusOf(c.items) === want) { selected = { cluster: c.key }; break outer; }
       for (const r of rows) for (const c of COLUMNS) {
         const it = r.cells[c.key];
@@ -425,33 +425,34 @@ function StatusPage() {
 
   return (
     <div className="st-layout">
-      <div className="st-topbar">
+      <header className="st-topbar">
         <a className="st-back" href="index.html">← Cockpit</a>
-        <div>
-          <div className="st-title">System status</div>
-          <div className="st-sub">
-            {error ? `server unreachable: ${error}` : updated ? `updated ${new Date(updated).toLocaleTimeString()}` : "loading…"}
-          </div>
-        </div>
+        <div className="st-title">System status</div>
         <div className="st-spacer" />
-        {me && me.user && (
-          <button className="st-chip" style={{ cursor: "pointer", fontFamily: "inherit" }}
-                  onClick={() => window.cockpitAuth.logout()} title="Log out">
-            {me.user} · log out
-          </button>
-        )}
-        <div className="st-tally">
-          <span className="st-chip"><span className="st-dot ok" />{tally[OK]} OK</span>
-          <span className="st-chip"><span className="st-dot warn" />{tally[WARN]} warning</span>
-          <span className="st-chip"><span className="st-dot fail" />{tally[FAIL]} failed</span>
-          {tally[UNKNOWN] > 0 && <span className="st-chip"><span className="st-dot unknown" />{tally[UNKNOWN]} unknown</span>}
-        </div>
-      </div>
+        <span className={`st-live ${error ? "err" : ""}`} title={error ? `server unreachable: ${error}` : "refreshes every 3 s"}>
+          <span className="st-live-dot" />
+          {error ? "server unreachable" : updated ? `updated ${new Date(updated).toLocaleTimeString()}` : "loading…"}
+        </span>
+        <cockpitWatchdog.Button />
+        <cockpitAuth.LogoutButton />
+      </header>
+
+      <section className="st-tiles">
+        {[[OK, "OK", "ok"], [WARN, "Warning", "warn"], [FAIL, "Failed", "fail"], [UNKNOWN, "Unknown", "unknown"]].map(([lvl, label, cls]) => (
+          <div key={cls} className={`st-tile ${cls} ${tally[lvl] > 0 && lvl !== OK ? "active" : ""}`}>
+            <span className={`st-tile-dot ${cls}`} />
+            <div>
+              <div className="st-tile-label">{label}</div>
+              <div className="st-tile-value">{tally[lvl]}</div>
+            </div>
+          </div>
+        ))}
+      </section>
 
       <div className="st-body">
         <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
           <div className="st-card">
-            <h2>Nodes</h2>
+            <div className="st-card-head"><h2>Nodes</h2><span className="st-count">{rows.length}</span></div>
             <div className="st-matrix-wrap">
               <table className="st-matrix">
                 <thead>
@@ -497,7 +498,7 @@ function StatusPage() {
           </div>
 
           <div className="st-card">
-            <h2>Cluster</h2>
+            <div className="st-card-head"><h2>Cluster</h2><span className="st-count">{cluster.length}</span></div>
             <div className="st-cluster">
               {cluster.map((c) => {
                 const st = statusOf(c.items);
@@ -520,7 +521,12 @@ function StatusPage() {
             <div className="st-empty">Everything is green. Click any light to see the checks behind it and how to investigate.</div>
           ) : (
             <>
-              <h3>{detail.title}</h3>
+              <div className="st-detail-head">
+                <h3>{detail.title}</h3>
+                {(() => { const st = statusOf(detail.items); return (
+                  <span className={`st-pill ${STATUS_CLASS[st]}`}>{{ [OK]: "OK", [WARN]: "warning", [FAIL]: "failed", [UNKNOWN]: "unknown" }[st]}</span>
+                ); })()}
+              </div>
               <div className="st-what">{detail.book.what}</div>
               <ul className="st-items">
                 {sortedItems.map((it, i) => (

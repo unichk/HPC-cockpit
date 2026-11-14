@@ -9,21 +9,50 @@
   <link rel="stylesheet" href="styles.css?v=7" />
   <style>
     body { overflow: auto; }
-    .st-layout { display: flex; flex-direction: column; gap: 10px; padding: 8px 10px 16px; min-height: 100vh; box-sizing: border-box; }
-    .st-topbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 7px 14px; box-shadow: var(--shadow-sm); }
-    .st-back { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--accent); text-decoration: none; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--accent-soft); }
-    .st-back:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
-    .st-title { font-size: 16px; font-weight: 800; color: var(--ink); }
-    .st-sub { font-size: 11px; color: var(--muted); font-weight: 500; }
-    .st-spacer { flex: 1; }
-    .st-tally { display: flex; gap: 6px; }
-    .st-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-2); color: var(--ink); font-variant-numeric: tabular-nums; }
+    .st-layout { display: flex; flex-direction: column; gap: 12px; padding: 10px 12px 24px; min-height: 100vh; box-sizing: border-box; max-width: 1600px; margin: 0 auto; }
 
-    .st-body { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 10px; align-items: start; }
+    /* top bar (shared look with directory.html) */
+    .st-topbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 10px 16px; box-shadow: var(--shadow-sm); }
+    .st-back { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--accent); text-decoration: none; padding: 5px 11px; border-radius: 8px; border: 1px solid var(--line); background: var(--accent-soft); }
+    .st-back:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .st-title { font-size: 17px; font-weight: 800; color: var(--ink); letter-spacing: -0.01em; }
+    .st-spacer { flex: 1; }
+    .st-live { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .st-live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+    .st-live.err { color: var(--crit); }
+    .st-live.err .st-live-dot { background: var(--crit); box-shadow: 0 0 0 3px color-mix(in srgb, var(--crit) 22%, transparent); }
+
+    /* summary tiles */
+    .st-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    @media (max-width: 700px) { .st-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    .st-tile { display: flex; align-items: center; gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 12px 16px; box-shadow: var(--shadow-sm); }
+    .st-tile-dot { flex-shrink: 0; width: 14px; height: 14px; border-radius: 50%; }
+    .st-tile-dot.ok { background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 18%, transparent); }
+    .st-tile-dot.warn { background: var(--warn); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 20%, transparent); }
+    .st-tile-dot.fail { background: var(--crit); box-shadow: 0 0 0 4px color-mix(in srgb, var(--crit) 18%, transparent); }
+    .st-tile-dot.unknown { border: 2px dashed var(--muted); box-sizing: border-box; }
+    .st-tile-label { font-size: 10px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+    .st-tile-value { font-size: 22px; font-weight: 800; color: var(--ink); line-height: 1.15; font-variant-numeric: tabular-nums; }
+    .st-tile.active.warn { border-color: color-mix(in srgb, var(--warn) 55%, transparent); background: color-mix(in srgb, var(--warn) 7%, var(--surface)); }
+    .st-tile.active.fail { border-color: color-mix(in srgb, var(--crit) 50%, transparent); background: color-mix(in srgb, var(--crit) 6%, var(--surface)); }
+    .st-tile.active.fail .st-tile-value { color: var(--crit); }
+    .st-tile.active.unknown { border-style: dashed; border-color: var(--muted); }
+
+    .st-body { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 12px; align-items: start; }
     @media (max-width: 1100px) { .st-body { grid-template-columns: minmax(0, 1fr); } }
 
-    .st-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); padding: 12px 14px; }
-    .st-card h2 { margin: 0 0 8px; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+    .st-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); padding: 0 16px 14px; min-width: 0; }
+    .st-card-head { display: flex; align-items: center; gap: 8px; margin: 0 -16px 10px; padding: 12px 16px; border-bottom: 1px solid var(--line-2); }
+    .st-card-head h2 { margin: 0; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+    .st-count { font-size: 11px; font-weight: 700; color: var(--ink-2); background: var(--accent-soft); padding: 1px 8px; border-radius: 999px; font-variant-numeric: tabular-nums; }
+
+    .st-detail { padding-top: 14px; position: sticky; top: 10px; }
+    .st-detail-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .st-pill { font-size: 10px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; }
+    .st-pill.ok { background: color-mix(in srgb, var(--ok) 18%, var(--surface)); color: color-mix(in srgb, var(--ok) 70%, var(--ink)); }
+    .st-pill.warn { background: color-mix(in srgb, var(--warn) 22%, var(--surface)); color: color-mix(in srgb, var(--warn) 55%, var(--ink)); }
+    .st-pill.fail { background: var(--crit); color: #fff; }
+    .st-pill.unknown { border: 1px dashed var(--muted); color: var(--muted); }
 
     .st-matrix-wrap { overflow-x: auto; }
     table.st-matrix { border-collapse: separate; border-spacing: 0; width: 100%; }
@@ -81,12 +110,13 @@
 <body>
   <div id="root"></div>
 
-  <script src="auth.js?v=1"></script>
+  <script src="auth.js?v=2"></script>
+  <script src="watchdog.js?v=2"></script>
 
   <script src="vendor/react.development.js"></script>
   <script src="vendor/react-dom.development.js"></script>
   <script src="vendor/babel.min.js"></script>
   <script src="live-data.js?v=9"></script>
-  <script type="text/babel" src="status.jsx?v=2"></script>
+  <script type="text/babel" src="status.jsx?v=4"></script>
 </body>
 </html>

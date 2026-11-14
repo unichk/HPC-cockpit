@@ -231,7 +231,8 @@
   </head>
   <body>
     <div id="root"></div>
-    <script src="auth.js?v=1"></script>
+    <script src="auth.js?v=2"></script>
+    <script src="watchdog.js?v=2"></script>
     <script src="vendor/react.development.js"></script>
     <script src="vendor/react-dom.development.js"></script>
     <script src="vendor/babel.min.js"></script>
@@ -2548,6 +2549,8 @@
                   : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
                 }
               </button>
+              <cockpitWatchdog.Button />
+              <cockpitAuth.LogoutButton />
             </header>
 
             <div className="nd-summary">
